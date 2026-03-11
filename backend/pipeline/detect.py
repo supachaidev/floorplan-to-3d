@@ -14,40 +14,93 @@ logger = logging.getLogger(__name__)
 def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
     """Detect rooms using OpenCV for clean printed plans.
 
+    Uses flood-fill to find enclosed white regions (rooms) between walls.
+    Sweeps multiple threshold parameters and picks the best result.
+
     Returns a list of room dicts or None if detection fails.
     """
     h, w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    binary = cv2.adaptiveThreshold(
-        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY_INV, 15, 5,
-    )
+    # Normalize contrast for varying image quality
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=3)
+    best_rooms = None
 
-    contours, hierarchy = cv2.findContours(
-        closed, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE,
-    )
+    # Sweep threshold parameters — different images need different settings
+    for block_size in [11, 15, 21, 31]:
+        for c_val in [3, 5, 8]:
+            rooms = _find_enclosed_rooms(enhanced, w, h, block_size, c_val)
+            if rooms is not None and (
+                best_rooms is None or len(rooms) > len(best_rooms)
+            ):
+                best_rooms = rooms
 
-    if hierarchy is None:
+    if best_rooms is None:
         return None
 
+    _classify_rooms_by_geometry(best_rooms)
+    return best_rooms
+
+
+def _find_enclosed_rooms(
+    gray: np.ndarray, w: int, h: int, block_size: int, c_val: int,
+) -> list[dict] | None:
+    """Find rooms as enclosed white regions between detected walls."""
+    # Detect walls (dark lines become white)
+    binary = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, block_size, c_val,
+    )
+
+    # Close small gaps in walls
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    walls = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Thicken walls to seal door openings and thin gaps
+    walls = cv2.dilate(walls, kernel, iterations=1)
+
+    # Invert: rooms become white (255), walls become black (0)
+    rooms_mask = cv2.bitwise_not(walls)
+
+    # Flood fill background from edges to isolate enclosed rooms.
+    # Add a white border so the background is guaranteed to be connected
+    # to the corner, then flood fill from (0,0) to turn background black.
+    bordered = cv2.copyMakeBorder(
+        rooms_mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=255,
+    )
+    flood_mask = np.zeros(
+        (bordered.shape[0] + 2, bordered.shape[1] + 2), dtype=np.uint8,
+    )
+    cv2.floodFill(bordered, flood_mask, (0, 0), 0)
+    # Remove added border — only enclosed rooms remain white
+    rooms_only = bordered[1:-1, 1:-1]
+
+    contours, _ = cv2.findContours(
+        rooms_only, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+    )
+
+    min_area = (w * h) * 0.005  # 0.5% — catch small rooms like closets
+    max_area = (w * h) * 0.8
+
     rooms = []
-    min_area = (w * h) * 0.01
-
-    for i, cnt in enumerate(contours):
+    for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < min_area:
-            continue
-        if hierarchy[0][i][3] == -1 and area > (w * h) * 0.9:
+        if area < min_area or area > max_area:
             continue
 
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-        if len(approx) < 3:
+        # Use convex hull to remove door-arc notches from room polygons
+        hull = cv2.convexHull(cnt)
+
+        peri = cv2.arcLength(hull, True)
+        approx = cv2.approxPolyDP(hull, 0.015 * peri, True)
+        if len(approx) < 4:
             continue
+
+        # Compute aspect ratio for classification
+        _, _, bw, bh = cv2.boundingRect(cnt)
+        aspect = min(bw, bh) / max(bw, bh) if max(bw, bh) > 0 else 1.0
 
         polygon = []
         for pt in approx:
@@ -58,9 +111,66 @@ def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
             "label": f"Room {len(rooms) + 1}",
             "polygon": polygon,
             "type": "other",
+            "_area_frac": area / (w * h),
+            "_aspect": aspect,
         })
 
     return rooms if len(rooms) >= 2 else None
+
+
+def _classify_rooms_by_geometry(rooms: list[dict]) -> None:
+    """Assign room types based on area and aspect ratio heuristics.
+
+    Mutates rooms in place. This is approximate — the Claude Vision
+    path provides more reliable classification.
+    """
+    if not rooms:
+        return
+
+    total_area = sum(r["_area_frac"] for r in rooms)
+
+    # First pass: assign types
+    for room in rooms:
+        frac = room.pop("_area_frac")
+        aspect = room.pop("_aspect")
+        share = frac / total_area if total_area > 0 else 0
+
+        if aspect < 0.3:
+            room["type"] = "hallway"
+        elif share > 0.35:
+            room["type"] = "living"
+        elif share > 0.15:
+            room["type"] = "bedroom"
+        elif share > 0.08:
+            room["type"] = "kitchen"
+        elif share < 0.04:
+            room["type"] = "bathroom"
+        else:
+            room["type"] = "other"
+
+    # Second pass: assign numbered labels per type
+    _TYPE_LABELS = {
+        "hallway": "Hallway",
+        "living": "Living Room",
+        "bedroom": "Bedroom",
+        "kitchen": "Kitchen",
+        "bathroom": "Bathroom",
+        "other": "Room",
+    }
+    type_counts: dict[str, int] = {}
+    for room in rooms:
+        rtype = room["type"]
+        type_counts[rtype] = type_counts.get(rtype, 0) + 1
+
+    type_idx: dict[str, int] = {}
+    for room in rooms:
+        rtype = room["type"]
+        base = _TYPE_LABELS.get(rtype, "Room")
+        if type_counts[rtype] > 1:
+            type_idx[rtype] = type_idx.get(rtype, 0) + 1
+            room["label"] = f"{base} {type_idx[rtype]}"
+        else:
+            room["label"] = base
 
 
 # Door detection thresholds
@@ -86,7 +196,11 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
     """
     h, w = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY_INV)
+
+    # Use Otsu's threshold instead of fixed value for robustness
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    _, binary = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
     contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
