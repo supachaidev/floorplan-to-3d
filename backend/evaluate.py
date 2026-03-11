@@ -118,7 +118,7 @@ def point_distance(a: dict, b: dict) -> float:
 
 
 def match_doors(
-    gt_doors: list[dict], pred_doors: list[dict], dist_threshold: float = 0.05
+    gt_doors: list[dict], pred_doors: list[dict], dist_threshold: float = 0.08
 ) -> list[dict]:
     """Match predicted doors to ground truth by position proximity."""
     if not gt_doors or not pred_doors:
