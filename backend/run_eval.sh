@@ -90,7 +90,7 @@ ZIP_PATH="$CUBICASA_DIR/cubicasa5k.zip"
 echo "[2/4] Preparing CubiCasa5K dataset..."
 
 # Check if we already have extracted data with model.svg files
-SAMPLE_COUNT=$(find "$CUBICASA_DIR" -name "model.svg" 2>/dev/null | wc -l | tr -d ' ')
+SAMPLE_COUNT=$([ -d "$CUBICASA_DIR" ] && find "$CUBICASA_DIR" -name "model.svg" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
 
 if [ "$SAMPLE_COUNT" -gt 0 ]; then
     echo "  Dataset already available ($SAMPLE_COUNT samples found)"
@@ -120,7 +120,7 @@ else
     fi
 
     # Verify extraction
-    SAMPLE_COUNT=$(find "$CUBICASA_DIR" -name "model.svg" 2>/dev/null | wc -l | tr -d ' ')
+    SAMPLE_COUNT=$([ -d "$CUBICASA_DIR" ] && find "$CUBICASA_DIR" -name "model.svg" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
     if [ "$SAMPLE_COUNT" -eq 0 ]; then
         echo "  Error: extraction failed — no model.svg files found."
         echo "  Check $CUBICASA_DIR for the extracted contents."
