@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Floorplan to 3D</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            min-height: 100vh;
+        }
+        header {
+            padding: 20px 32px;
+            background: #1a1a1a;
+            border-bottom: 1px solid #333;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            color: #fff;
+        }
+        .upload-area {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .upload-btn {
+            background: #2563eb;
+            color: #fff;
+            border: none;
+            padding: 8px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+        }
+        .upload-btn:hover { background: #1d4ed8; }
+        .upload-btn:disabled { background: #555; cursor: not-allowed; }
+        #file-input { display: none; }
+        #status {
+            font-size: 13px;
+            color: #999;
+        }
+        .option-group {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #aaa;
+        }
+        .option-group input[type="checkbox"] {
+            accent-color: #2563eb;
+        }
+        .panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            height: calc(100vh - 68px);
+        }
+        .panel {
+            position: relative;
+            border-right: 1px solid #333;
+            overflow: hidden;
+        }
+        .panel:last-child { border-right: none; }
+        .panel-label {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            background: rgba(0,0,0,0.7);
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #aaa;
+            z-index: 10;
+            pointer-events: none;
+        }
+        #canvas-2d {
+            width: 100%;
+            height: 100%;
+            display: block;
+            cursor: crosshair;
+        }
+        #viewer-3d {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .toolbar {
+            position: absolute;
+            bottom: 12px;
+            left: 12px;
+            display: flex;
+            gap: 8px;
+            z-index: 10;
+        }
+        .toolbar button {
+            background: rgba(37, 99, 235, 0.9);
+            color: #fff;
+            border: none;
+            padding: 6px 14px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .toolbar button:hover { background: rgba(29, 78, 216, 0.9); }
+        .drop-overlay {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(37, 99, 235, 0.15);
+            border: 3px dashed #2563eb;
+            z-index: 100;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: #2563eb;
+        }
+        .drop-overlay.active { display: flex; }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Floorplan to 3D</h1>
+        <div class="upload-area">
+            <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">
+                Upload Floor Plan
+            </button>
+            <input type="file" id="file-input" accept="image/*">
+            <label class="option-group">
+                <input type="checkbox" id="force-claude">
+                Use Claude Vision
+            </label>
+            <span id="status"></span>
+        </div>
+    </header>
+
+    <div class="panels">
+        <div class="panel">
+            <div class="panel-label">2D Editor</div>
+            <canvas id="canvas-2d"></canvas>
+            <div class="toolbar" id="editor-toolbar" style="display:none;">
+                <button onclick="window.editor.resetPolygons()">Reset</button>
+                <button onclick="window.editor.confirmAndRender3D()">Confirm & View 3D</button>
+            </div>
+        </div>
+        <div class="panel">
+            <div class="panel-label">3D Viewer</div>
+            <div id="viewer-3d"></div>
+        </div>
+    </div>
+
+    <div class="drop-overlay" id="drop-overlay">Drop floor plan image here</div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="editor.js"></script>
+    <script src="viewer.js"></script>
+    <script>
+        const API_URL = "http://localhost:8000";
+        const fileInput = document.getElementById("file-input");
+        const statusEl = document.getElementById("status");
+        const uploadBtn = document.getElementById("upload-btn");
+        const forceClaudeCheckbox = document.getElementById("force-claude");
+
+        let currentFloorplan = null;
+
+        fileInput.addEventListener("change", async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            await processFile(file);
+        });
+
+        // Drag and drop
+        const dropOverlay = document.getElementById("drop-overlay");
+        document.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            dropOverlay.classList.add("active");
+        });
+        document.addEventListener("dragleave", (e) => {
+            if (e.relatedTarget === null) dropOverlay.classList.remove("active");
+        });
+        document.addEventListener("drop", async (e) => {
+            e.preventDefault();
+            dropOverlay.classList.remove("active");
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith("image/")) {
+                await processFile(file);
+            }
+        });
+
+        async function processFile(file) {
+            statusEl.textContent = "Uploading and processing...";
+            uploadBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append("file", file);
+
+            const forceClaude = forceClaudeCheckbox.checked;
+            const url = `${API_URL}/upload?force_claude=${forceClaude}`;
+
+            try {
+                const resp = await fetch(url, { method: "POST", body: formData });
+                if (!resp.ok) {
+                    let msg = "Upload failed";
+                    try { const err = await resp.json(); msg = err.error || msg; } catch {}
+                    throw new Error(msg);
+                }
+                currentFloorplan = await resp.json();
+                if (!currentFloorplan?.floorplan?.rooms) {
+                    throw new Error("Invalid response from server");
+                }
+                const nRooms = currentFloorplan.floorplan.rooms.length;
+                const nDoors = (currentFloorplan.floorplan.doors || []).length;
+                statusEl.textContent = `Detected ${nRooms} rooms, ${nDoors} doors`;
+
+                // Load image for 2D editor
+                const imgUrl = URL.createObjectURL(file);
+                window.editor.loadImage(imgUrl, currentFloorplan);
+                document.getElementById("editor-toolbar").style.display = "flex";
+
+                // Also render 3D immediately
+                window.viewer.render(currentFloorplan);
+
+            } catch (err) {
+                statusEl.textContent = `Error: ${err.message}`;
+            } finally {
+                uploadBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
