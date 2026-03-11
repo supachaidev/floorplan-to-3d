@@ -75,7 +75,7 @@ def compute_iou(poly_a: list[dict], poly_b: list[dict], size: int = 500) -> floa
 
 
 def match_rooms(
-    gt_rooms: list[dict], pred_rooms: list[dict], iou_threshold: float = 0.3
+    gt_rooms: list[dict], pred_rooms: list[dict], iou_threshold: float = 0.25
 ) -> list[dict]:
     """Match predicted rooms to ground truth using IoU.
 

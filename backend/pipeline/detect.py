@@ -27,15 +27,21 @@ def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
     enhanced = clahe.apply(gray)
 
     best_rooms = None
+    best_score = -1.0
 
-    # Sweep threshold parameters — different images need different settings
+    # Sweep threshold and morphology parameters
     for block_size in [11, 15, 21, 31]:
         for c_val in [3, 5, 8]:
-            rooms = _find_enclosed_rooms(enhanced, w, h, block_size, c_val)
-            if rooms is not None and (
-                best_rooms is None or len(rooms) > len(best_rooms)
-            ):
-                best_rooms = rooms
+            for morph_k in [3, 5]:
+                rooms = _find_enclosed_rooms(
+                    enhanced, w, h, block_size, c_val, morph_k,
+                )
+                if rooms is None:
+                    continue
+                score = _score_room_set(rooms)
+                if score > best_score:
+                    best_score = score
+                    best_rooms = rooms
 
     if best_rooms is None:
         return None
@@ -44,8 +50,62 @@ def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
     return best_rooms
 
 
+def _score_room_set(rooms: list[dict]) -> float:
+    """Score a set of detected rooms by quality, not just count.
+
+    Prefers results where total room area covers 40-90% of the image
+    with minimal mutual overlap and uniform room sizes (not fragmented).
+    """
+    if not rooms:
+        return -1.0
+
+    areas = [r["_area_frac"] for r in rooms]
+    total_area = sum(areas)
+
+    # Penalize coverage outside the sweet spot (40-90% of image)
+    if total_area < 0.4:
+        coverage_score = total_area / 0.4
+    elif total_area > 0.9:
+        coverage_score = max(0, 1.0 - (total_area - 0.9) / 0.5)
+    else:
+        coverage_score = 1.0
+
+    # Reward more rooms (log scale, capped to avoid runaway)
+    count_score = min(math.log2(max(len(rooms), 1)) / 5.0, 0.5)
+
+    # Penalize fragmentation: if many rooms are tiny (< 1% of image),
+    # the result is likely noise from aggressive thresholding
+    tiny_count = sum(1 for a in areas if a < 0.01)
+    frag_penalty = 0.3 * (tiny_count / max(len(rooms), 1))
+
+    # Penalize overlap between rooms using mask-based comparison
+    overlap_penalty = 0.0
+    if len(rooms) > 1:
+        size = 200
+        masks = []
+        for r in rooms:
+            mask = np.zeros((size, size), dtype=np.uint8)
+            pts = np.array(
+                [[int(p["x"] * size), int(p["y"] * size)] for p in r["polygon"]],
+                dtype=np.int32,
+            )
+            if len(pts) >= 3:
+                cv2.fillPoly(mask, [pts], 255)
+            masks.append(mask)
+        combined = np.zeros((size, size), dtype=np.uint8)
+        double_count = np.zeros((size, size), dtype=np.uint8)
+        for m in masks:
+            double_count[np.logical_and(combined > 0, m > 0)] = 255
+            combined = np.maximum(combined, m)
+        if combined.sum() > 0:
+            overlap_penalty = 1.5 * double_count.sum() / combined.sum()
+
+    return coverage_score + count_score - frag_penalty - overlap_penalty
+
+
 def _find_enclosed_rooms(
     gray: np.ndarray, w: int, h: int, block_size: int, c_val: int,
+    morph_k: int = 3,
 ) -> list[dict] | None:
     """Find rooms as enclosed white regions between detected walls."""
     # Detect walls (dark lines become white)
@@ -54,11 +114,9 @@ def _find_enclosed_rooms(
         cv2.THRESH_BINARY_INV, block_size, c_val,
     )
 
-    # Close small gaps in walls
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    # Close small gaps in walls, then dilate to seal door openings
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_k, morph_k))
     walls = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    # Thicken walls to seal door openings and thin gaps
     walls = cv2.dilate(walls, kernel, iterations=1)
 
     # Invert: rooms become white (255), walls become black (0)
@@ -90,13 +148,22 @@ def _find_enclosed_rooms(
         if area < min_area or area > max_area:
             continue
 
-        # Use convex hull to remove door-arc notches from room polygons
-        hull = cv2.convexHull(cnt)
-
-        peri = cv2.arcLength(hull, True)
-        approx = cv2.approxPolyDP(hull, 0.015 * peri, True)
+        # Approximate contour, preserving significant concavities (L-shapes)
+        # but smoothing noise. Use hull only when shape is nearly convex.
+        peri = cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
         if len(approx) < 4:
             continue
+
+        hull = cv2.convexHull(cnt)
+        hull_area = cv2.contourArea(hull)
+        solidity = area / hull_area if hull_area > 0 else 1.0
+        # If shape is >92% convex, use hull (removes noise notches)
+        # Otherwise keep the concave approximation (L/T shapes)
+        if solidity > 0.92:
+            approx = cv2.approxPolyDP(hull, 0.015 * peri, True)
+            if len(approx) < 4:
+                continue
 
         # Compute aspect ratio for classification
         _, _, bw, bh = cv2.boundingRect(cnt)
@@ -173,14 +240,14 @@ def _classify_rooms_by_geometry(rooms: list[dict]) -> None:
             room["label"] = base
 
 
-# Door detection thresholds
-_DOOR_MIN_AREA = 100
-_DOOR_ASPECT_MIN = 0.6
-_DOOR_BBOX_FILL_MIN = 0.55
-_DOOR_BBOX_FILL_MAX = 0.85
-_DOOR_QTR_AREA_RATIO_MIN = 0.6
-_DOOR_QTR_AREA_RATIO_MAX = 1.15
-_DOOR_SOLIDITY_MIN = 0.9
+# Door detection thresholds — moderately relaxed for imperfect arcs
+_DOOR_MIN_AREA = 80
+_DOOR_ASPECT_MIN = 0.55
+_DOOR_BBOX_FILL_MIN = 0.45
+_DOOR_BBOX_FILL_MAX = 0.88
+_DOOR_QTR_AREA_RATIO_MIN = 0.50
+_DOOR_QTR_AREA_RATIO_MAX = 1.20
+_DOOR_SOLIDITY_MIN = 0.80
 _DOOR_RADIUS_FRAC_MIN = 0.02   # fraction of max image dimension
 _DOOR_RADIUS_FRAC_MAX = 0.15
 
@@ -278,14 +345,19 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
         dists = np.sqrt((pts[:, 0] - hinge[0]) ** 2 + (pts[:, 1] - hinge[1]) ** 2)
         radius = float(np.max(dists))
 
+        # Use centroid as position to match ground truth convention
         doors.append({
             "id": f"door_{len(doors) + 1}",
             "position": {
-                "x": round(float(hinge[0]) / w, 4),
-                "y": round(float(hinge[1]) / h, 4),
+                "x": round(mass_x / w, 4),
+                "y": round(mass_y / h, 4),
             },
             "width": round(radius / max_dim, 4),
             "angle": round(arc_angle % 360, 1),
+            "_hinge": {
+                "x": round(float(hinge[0]) / w, 4),
+                "y": round(float(hinge[1]) / h, 4),
+            },
         })
 
     return doors
