@@ -1,12 +1,19 @@
 import json
 
 
-def build_floorplan_json(rooms: list[dict], doors: list[dict] | None = None) -> dict:
+def build_floorplan_json(
+    rooms: list[dict],
+    doors: list[dict] | None = None,
+    image_width_m: float = 0,
+    image_height_m: float = 0,
+) -> dict:
     """Build the final floorplan JSON schema."""
     result = {
         "floorplan": {
             "scale": 0.01,
             "units": "meters",
+            "image_width_m": round(image_width_m, 2),
+            "image_height_m": round(image_height_m, 2),
             "rooms": rooms,
             "doors": doors or [],
         }

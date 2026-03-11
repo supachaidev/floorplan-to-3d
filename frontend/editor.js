@@ -39,24 +39,46 @@
     };
 
     // ── coordinate helpers ──────────────────────────────────────────
+    // The coordinate system maps meter-based polygon coordinates to the
+    // same screen rectangle as the background image, so they align.
+    let imgRect = { x: 0, y: 0, w: 1, h: 1 };
+
     function resizeCanvas() {
         const p = canvas.parentElement;
         canvas.width = p.clientWidth;
         canvas.height = p.clientHeight;
+        computeImageRect();
         draw();
     }
 
-    function getScale() {
+    function computeImageRect() {
         const pad = 40, cw = canvas.width - pad * 2, ch = canvas.height - pad * 2;
-        return Math.min(cw / (rooms._boundsX || 1), ch / (rooms._boundsY || 1));
+        if (!bgImage) { imgRect = { x: pad, y: pad, w: cw, h: ch }; return; }
+        const ia = bgImage.width / bgImage.height, ca = cw / ch;
+        let dw, dh;
+        if (ia > ca) { dw = cw; dh = cw / ia; } else { dh = ch; dw = ch * ia; }
+        imgRect = { x: pad, y: pad, w: dw, h: dh };
     }
+
     function toScreen(pt) {
-        const pad = 40, s = getScale();
-        return { x: pad + pt.x * s, y: pad + pt.y * s };
+        // Map meter coordinates to image screen rect
+        const bx = rooms._boundsX || 1, by = rooms._boundsY || 1;
+        return {
+            x: imgRect.x + (pt.x / bx) * imgRect.w,
+            y: imgRect.y + (pt.y / by) * imgRect.h,
+        };
     }
     function fromScreen(sx, sy) {
-        const pad = 40, s = getScale();
-        return { x: (sx - pad) / s, y: (sy - pad) / s };
+        const bx = rooms._boundsX || 1, by = rooms._boundsY || 1;
+        return {
+            x: ((sx - imgRect.x) / imgRect.w) * bx,
+            y: ((sy - imgRect.y) / imgRect.h) * by,
+        };
+    }
+    function getScale() {
+        // Average scale factor for uniform-size elements (handles, door arcs)
+        const bx = rooms._boundsX || 1, by = rooms._boundsY || 1;
+        return Math.min(imgRect.w / bx, imgRect.h / by);
     }
 
     function getDoorRotateHandle(door) {
@@ -68,26 +90,46 @@
     // ── data ────────────────────────────────────────────────────────
     function loadImage(url, floorplan) {
         const img = new Image();
-        img.onload = () => { bgImage = img; floorplanData = floorplan; buildWorkingCopy(); resizeCanvas(); };
+        img.onload = () => { bgImage = img; floorplanData = floorplan; buildWorkingCopy(); computeImageRect(); resizeCanvas(); };
         img.src = url;
     }
 
     function buildWorkingCopy() {
         if (!floorplanData) return;
-        let maxX = 0, maxY = 0;
-        for (const r of floorplanData.floorplan.rooms)
-            for (const p of r.polygon) { maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); }
-        for (const d of (floorplanData.floorplan.doors || []))
-            { maxX = Math.max(maxX, d.position.x + (d.width || 0.9)); maxY = Math.max(maxY, d.position.y + (d.width || 0.9)); }
+        const fp = floorplanData.floorplan;
 
-        rooms = floorplanData.floorplan.rooms.map(r => ({
+        // Use full image dimensions (meters) as bounds so polygons align
+        // with the background image. If not provided by API, compute from
+        // the image dimensions using the same formula as the backend
+        // (longest side = 15 meters).
+        let boundsX = fp.image_width_m || 0;
+        let boundsY = fp.image_height_m || 0;
+        if ((!boundsX || !boundsY) && bgImage) {
+            const maxDim = Math.max(bgImage.width, bgImage.height);
+            const mpp = 15.0 / maxDim;
+            boundsX = bgImage.width * mpp;
+            boundsY = bgImage.height * mpp;
+        }
+        if (!boundsX || !boundsY) {
+            for (const r of fp.rooms)
+                for (const p of r.polygon) {
+                    boundsX = Math.max(boundsX, p.x);
+                    boundsY = Math.max(boundsY, p.y);
+                }
+            for (const d of (fp.doors || [])) {
+                boundsX = Math.max(boundsX, d.position.x + (d.width || 0.9));
+                boundsY = Math.max(boundsY, d.position.y + (d.width || 0.9));
+            }
+        }
+
+        rooms = fp.rooms.map(r => ({
             ...r, polygon: r.polygon.map(p => ({ x: p.x, y: p.y })),
         }));
-        doors = (floorplanData.floorplan.doors || []).map(d => ({
+        doors = (fp.doors || []).map(d => ({
             ...d, position: { x: d.position.x, y: d.position.y },
         }));
-        rooms._boundsX = maxX || 1;
-        rooms._boundsY = maxY || 1;
+        rooms._boundsX = boundsX || 1;
+        rooms._boundsY = boundsY || 1;
     }
 
     // ── hit-testing ─────────────────────────────────────────────────
@@ -159,12 +201,8 @@
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         if (bgImage) {
-            const pad = 40, cw = canvas.width - pad * 2, ch = canvas.height - pad * 2;
-            const ia = bgImage.width / bgImage.height, ca = cw / ch;
-            let dw, dh;
-            if (ia > ca) { dw = cw; dh = cw / ia; } else { dh = ch; dw = ch * ia; }
             ctx.globalAlpha = 0.3;
-            ctx.drawImage(bgImage, pad, pad, dw, dh);
+            ctx.drawImage(bgImage, imgRect.x, imgRect.y, imgRect.w, imgRect.h);
             ctx.globalAlpha = 1.0;
         }
         if (!rooms.length) return;

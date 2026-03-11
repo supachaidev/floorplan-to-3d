@@ -74,8 +74,10 @@ async def upload_floorplan(
         rooms_m = normalize_to_meters(rooms, pw, ph, scale_m_per_px=scale)
         doors_m = normalize_doors_to_meters(doors, pw, ph, scale_m_per_px=scale)
 
-        # Step 5: Build JSON
-        result = build_floorplan_json(rooms_m, doors_m)
+        # Step 5: Build JSON (include full image dimensions for 2D editor alignment)
+        image_width_m = pw * scale
+        image_height_m = ph * scale
+        result = build_floorplan_json(rooms_m, doors_m, image_width_m, image_height_m)
         return result
 
     except Exception:
