@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 node_modules/
 .DS_Store
+backend/.cubicasa/
+backend/tests/fixtures/
