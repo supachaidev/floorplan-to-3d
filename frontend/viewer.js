@@ -1,6 +1,6 @@
 /**
- * 3D Viewer - renders floorplan rooms using Three.js ExtrudeGeometry,
- * with door openings cut into walls.
+ * 3D Viewer - renders floorplan as wall segments with door openings,
+ * using Three.js.
  */
 (function () {
     const container = document.getElementById("viewer-3d");
@@ -18,6 +18,9 @@
         balcony: { color: 0x78c8c8, opacity: 0.6 },
         other: { color: 0xcccccc, opacity: 0.6 },
     };
+
+    const WALL_THICKNESS = 0.15;
+    const DOOR_HEIGHT = 2.1;
 
     function init() {
         if (initialized) return;
@@ -102,6 +105,81 @@
         });
     }
 
+    /**
+     * Project a door onto a wall segment and return the parametric
+     * t value (0..1) along the wall, or null if the door is not
+     * close enough. Uses the hinge point (on the wall) if available,
+     * falling back to the centroid position.
+     */
+    function doorOnWall(ax, ay, bx, by, door) {
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        if (len2 < 1e-8) return null;
+
+        const ref = door.position;
+        const px = ref.x - ax;
+        const py = ref.y - ay;
+
+        // Parametric projection onto line segment
+        let t = (px * dx + py * dy) / len2;
+        if (t < 0 || t > 1) return null;
+
+        // Perpendicular distance from reference point to wall line
+        const projX = ax + t * dx;
+        const projY = ay + t * dy;
+        const dist = Math.sqrt((ref.x - projX) ** 2 + (ref.y - projY) ** 2);
+
+        // Allow doors within a reasonable distance from the wall
+        const wallLen = Math.sqrt(len2);
+        const threshold = Math.max(WALL_THICKNESS * 4, wallLen * 0.08);
+        if (dist > threshold) return null;
+
+        return { t, width: door.width || 0.9 };
+    }
+
+    /**
+     * Build a wall quad (two triangles) between two 3D points at
+     * given Y range, offset by the wall normal for thickness.
+     * Returns a THREE.Mesh.
+     */
+    function makeWallMesh(x0, z0, x1, z1, yBottom, yTop, nx, nz, material) {
+        // Four corners of the wall face (outer side)
+        const o0 = [x0 + nx, yBottom, z0 + nz];
+        const o1 = [x1 + nx, yBottom, z1 + nz];
+        const o2 = [x1 + nx, yTop, z1 + nz];
+        const o3 = [x0 + nx, yTop, z0 + nz];
+        // Four corners (inner side)
+        const i0 = [x0 - nx, yBottom, z0 - nz];
+        const i1 = [x1 - nx, yBottom, z1 - nz];
+        const i2 = [x1 - nx, yTop, z1 - nz];
+        const i3 = [x0 - nx, yTop, z0 - nz];
+
+        // 6 faces: outer, inner, top, bottom, left cap, right cap
+        // prettier-ignore
+        const verts = new Float32Array([
+            // Outer face
+            ...o0, ...o1, ...o2,  ...o0, ...o2, ...o3,
+            // Inner face
+            ...i1, ...i0, ...i3,  ...i1, ...i3, ...i2,
+            // Top face
+            ...o3, ...o2, ...i2,  ...o3, ...i2, ...i3,
+            // Bottom face
+            ...o0, ...i1, ...o1,  ...o0, ...i0, ...i1,
+            // Left cap
+            ...o0, ...o3, ...i3,  ...o0, ...i3, ...i0,
+            // Right cap
+            ...o1, ...i2, ...o2,  ...o1, ...i1, ...i2,
+        ]);
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+        geo.computeVertexNormals();
+
+        const mesh = new THREE.Mesh(geo, material);
+        mesh.userData.isFloorplan = true;
+        return mesh;
+    }
+
     function render(floorplanData) {
         init();
         clearScene();
@@ -122,53 +200,95 @@
         cx /= count;
         cy /= count;
 
-        // Render rooms
+        // Render each room as wall segments with door openings
         rooms.forEach((room) => {
-            const shape = new THREE.Shape();
             const pts = room.polygon;
             if (pts.length < 3) return;
 
-            // Negate Y so 3D orientation matches the 2D editor
-            shape.moveTo(pts[0].x - cx, -(pts[0].y - cy));
-            for (let i = 1; i < pts.length; i++) {
-                shape.lineTo(pts[i].x - cx, -(pts[i].y - cy));
-            }
-            shape.lineTo(pts[0].x - cx, -(pts[0].y - cy));
-
             const height = room.height || 3.0;
-
-            const extrudeSettings = {
-                steps: 1,
-                depth: height,
-                bevelEnabled: false,
-            };
-
-            const geometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
             const matConfig = ROOM_MATERIALS[room.type] || ROOM_MATERIALS.other;
-            const material = new THREE.MeshPhongMaterial({
+            const wallMat = new THREE.MeshPhongMaterial({
                 color: matConfig.color,
                 opacity: matConfig.opacity,
                 transparent: true,
                 side: THREE.DoubleSide,
             });
 
-            const mesh = new THREE.Mesh(geometry, material);
-            mesh.rotation.x = -Math.PI / 2;
-            mesh.userData.isFloorplan = true;
-            mesh.userData.label = room.label;
-            scene.add(mesh);
+            // For each edge of the room polygon, build a wall segment
+            for (let i = 0; i < pts.length; i++) {
+                const a = pts[i];
+                const b = pts[(i + 1) % pts.length];
 
-            // Wireframe edges
-            const edges = new THREE.EdgesGeometry(geometry);
-            const lineMat = new THREE.LineBasicMaterial({
-                color: 0xffffff,
-                opacity: 0.3,
-                transparent: true,
-            });
-            const wireframe = new THREE.LineSegments(edges, lineMat);
-            wireframe.rotation.x = -Math.PI / 2;
-            wireframe.userData.isFloorplan = true;
-            scene.add(wireframe);
+                const ax = a.x - cx, az = -(a.y - cy);
+                const bx = b.x - cx, bz = -(b.y - cy);
+
+                const edgeDx = bx - ax, edgeDz = bz - az;
+                const wallLen = Math.sqrt(edgeDx * edgeDx + edgeDz * edgeDz);
+                if (wallLen < 0.01) continue;
+
+                // Outward normal for thickness
+                const nx = -edgeDz / wallLen * (WALL_THICKNESS / 2);
+                const nz = edgeDx / wallLen * (WALL_THICKNESS / 2);
+
+                // Find doors on this wall segment
+                const wallDoorHits = [];
+                for (const door of doors) {
+                    const hit = doorOnWall(a.x, a.y, b.x, b.y, door);
+                    if (hit) wallDoorHits.push(hit);
+                }
+
+                if (wallDoorHits.length === 0) {
+                    // Solid wall, no doors
+                    scene.add(makeWallMesh(
+                        ax, az, bx, bz, 0, height, nx, nz, wallMat
+                    ));
+                } else {
+                    // Sort doors by position along wall
+                    wallDoorHits.sort((a, b) => a.t - b.t);
+
+                    // Split wall into solid sections and door openings
+                    let prevT = 0;
+                    for (const dh of wallDoorHits) {
+                        const halfW = (dh.width / 2) / wallLen;
+                        const doorStart = Math.max(0, dh.t - halfW);
+                        const doorEnd = Math.min(1, dh.t + halfW);
+
+                        // Solid wall before this door
+                        if (doorStart > prevT + 0.001) {
+                            const sx = ax + edgeDx * prevT;
+                            const sz = az + edgeDz * prevT;
+                            const ex = ax + edgeDx * doorStart;
+                            const ez = az + edgeDz * doorStart;
+                            scene.add(makeWallMesh(
+                                sx, sz, ex, ez, 0, height, nx, nz, wallMat
+                            ));
+                        }
+
+                        // Wall above door opening (lintel)
+                        if (DOOR_HEIGHT < height) {
+                            const sx = ax + edgeDx * doorStart;
+                            const sz = az + edgeDz * doorStart;
+                            const ex = ax + edgeDx * doorEnd;
+                            const ez = az + edgeDz * doorEnd;
+                            scene.add(makeWallMesh(
+                                sx, sz, ex, ez, DOOR_HEIGHT, height, nx, nz,
+                                wallMat
+                            ));
+                        }
+
+                        prevT = doorEnd;
+                    }
+
+                    // Solid wall after last door
+                    if (prevT < 1 - 0.001) {
+                        const sx = ax + edgeDx * prevT;
+                        const sz = az + edgeDz * prevT;
+                        scene.add(makeWallMesh(
+                            sx, sz, bx, bz, 0, height, nx, nz, wallMat
+                        ));
+                    }
+                }
+            }
 
             // Room label
             const spriteMat = makeTextSprite(room.label);
@@ -180,30 +300,22 @@
         });
 
         // Render doors as 3D objects
-        // The angle from detection is the arc midpoint direction in 2D image space
-        // (0=right, 90=down, 180=left, 270=up).
-        // In 3D world space (after Y-negate): image-X maps to world-X,
-        // image-Y maps to world -Z. So convert:
-        //   world angle = -(imageAngle) because Y was negated
         doors.forEach((door) => {
             const pos = door.position;
             const doorWidth = door.width || 0.9;
-            const doorHeight = 2.1; // Standard door height
+            const doorHeight = DOOR_HEIGHT;
 
-            // Hinge position in world space (same transform as rooms)
+            // Door hinge in world space (same transform as rooms)
             const hx = pos.x - cx;
             const hz = -(pos.y - cy);
 
-            // Convert 2D image angle to 3D XZ-plane angle
-            // Image: 0=right(+X), 90=down(+Y). World: X=X, Z=-Y
-            // So world angle from +X axis = -imageAngle
+            // Convert 2D image angle to 3D XZ-plane angle.
+            // The detector angle is atan2 from hinge toward arc center in image
+            // space (Y-down). In world space Y is negated, but the panel rotation
+            // around Y already accounts for the flip, so use the angle directly.
             const imgAngleRad = (door.angle || 0) * Math.PI / 180;
-            const worldAngle = -imgAngleRad;
+            const worldAngle = imgAngleRad;
 
-            // The door panel (closed position) extends from hinge along the arc edge.
-            // A quarter-circle arc spans from startAngle to startAngle+90.
-            // The midpoint angle = startAngle + 45. So the closed-door edge is at
-            // midAngle - 45° and the open-door edge is at midAngle + 45°.
             const closedAngle = worldAngle - Math.PI / 4;
             const openAngle = worldAngle + Math.PI / 4;
 
@@ -222,27 +334,23 @@
                 side: THREE.DoubleSide,
             });
 
-            // Door panel as a thin box, pivoted from one end
-            // Place it at the closed position (one edge of the arc)
+            // Door panel (thin box pivoted from hinge end)
             const panelGeo = new THREE.BoxGeometry(doorWidth, doorHeight, 0.05);
-            // Shift geometry so pivot is at one end (hinge side)
             panelGeo.translate(doorWidth / 2, 0, 0);
             const panel = new THREE.Mesh(panelGeo, doorMat);
             panel.position.set(hx, doorHeight / 2, hz);
-            panel.rotation.y = -closedAngle; // rotate around Y to align with closed edge
+            panel.rotation.y = -closedAngle;
             panel.userData.isFloorplan = true;
             scene.add(panel);
 
             // Door frame posts
             const postGeo = new THREE.BoxGeometry(0.08, doorHeight + 0.1, 0.15);
 
-            // Hinge post
             const postHinge = new THREE.Mesh(postGeo, frameMat);
             postHinge.position.set(hx, doorHeight / 2, hz);
             postHinge.userData.isFloorplan = true;
             scene.add(postHinge);
 
-            // Latch-side post (at the end of closed-door position)
             const latchX = hx + doorWidth * Math.cos(closedAngle);
             const latchZ = hz + doorWidth * Math.sin(closedAngle);
             const postLatch = new THREE.Mesh(postGeo, frameMat);
@@ -250,7 +358,7 @@
             postLatch.userData.isFloorplan = true;
             scene.add(postLatch);
 
-            // Top beam connecting the two posts
+            // Top beam
             const beamLen = doorWidth + 0.08;
             const beamGeo = new THREE.BoxGeometry(beamLen, 0.1, 0.15);
             beamGeo.translate(beamLen / 2 - 0.04, 0, 0);
@@ -260,9 +368,8 @@
             beam.userData.isFloorplan = true;
             scene.add(beam);
 
-            // Door swing arc on the floor
-            // EllipseCurve works in 2D (X,Y), then we rotate to XZ plane
-            const arcStart = -openAngle;  // negate because EllipseCurve Y is up
+            // Door swing arc on floor
+            const arcStart = -openAngle;
             const arcEnd = -closedAngle;
             const arcCurve = new THREE.EllipseCurve(
                 0, 0,
@@ -284,7 +391,7 @@
             arcLine.userData.isFloorplan = true;
             scene.add(arcLine);
 
-            // Radial lines from hinge to arc endpoints on the floor
+            // Radial lines
             const radiiGeo = new THREE.BufferGeometry().setFromPoints([
                 new THREE.Vector3(0, 0, 0),
                 new THREE.Vector3(
@@ -335,7 +442,6 @@
     }
 
     function renderFloor(rooms, cx, cy) {
-        // Merge all room polygons into a single floor shape
         rooms.forEach((room) => {
             const pts = room.polygon;
             if (pts.length < 3) return;
@@ -356,7 +462,7 @@
             });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.rotation.x = -Math.PI / 2;
-            mesh.position.y = 0.01; // Slightly above grid
+            mesh.position.y = 0.01;
             mesh.userData.isFloorplan = true;
             scene.add(mesh);
         });

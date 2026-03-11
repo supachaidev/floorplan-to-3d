@@ -345,19 +345,14 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
         dists = np.sqrt((pts[:, 0] - hinge[0]) ** 2 + (pts[:, 1] - hinge[1]) ** 2)
         radius = float(np.max(dists))
 
-        # Use centroid as position to match ground truth convention
         doors.append({
             "id": f"door_{len(doors) + 1}",
             "position": {
-                "x": round(mass_x / w, 4),
-                "y": round(mass_y / h, 4),
-            },
-            "width": round(radius / max_dim, 4),
-            "angle": round(arc_angle % 360, 1),
-            "_hinge": {
                 "x": round(float(hinge[0]) / w, 4),
                 "y": round(float(hinge[1]) / h, 4),
             },
+            "width": round(radius / max_dim, 4),
+            "angle": round(arc_angle % 360, 1),
         })
 
     return doors
