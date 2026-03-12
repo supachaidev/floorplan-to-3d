@@ -496,4 +496,13 @@ def detect_rooms(image: np.ndarray, force_claude: bool = False) -> dict:
             cv_doors = detect_doors_cv(image)
             return {"rooms": cv_rooms, "doors": cv_doors}
 
-    return detect_rooms_claude(image)
+    try:
+        return detect_rooms_claude(image)
+    except (TypeError, RuntimeError) as e:
+        if "authentication" in str(e).lower() or "api_key" in str(e).lower():
+            raise RuntimeError(
+                "OpenCV detected fewer than 2 rooms and Claude Vision API "
+                "key is not configured. Set ANTHROPIC_API_KEY or try a "
+                "cleaner floor plan image."
+            ) from e
+        raise
