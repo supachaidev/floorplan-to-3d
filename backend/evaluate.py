@@ -150,7 +150,7 @@ def match_doors(
 
 
 def evaluate_image(
-    image_path: Path, gt_path: Path, force_claude: bool = False
+    image_path: Path, gt_path: Path,
 ) -> dict:
     """Run pipeline on a single image and compare with ground truth."""
     image = cv2.imread(str(image_path))
@@ -165,7 +165,7 @@ def evaluate_image(
 
     # Run pipeline
     processed = deskew(image)
-    detection = detect_rooms(processed, force_claude=force_claude)
+    detection = detect_rooms(processed)
     pred_rooms = detection["rooms"]
     pred_doors = detection["doors"]
 
@@ -312,11 +312,6 @@ def main():
         help="Directory containing test images and ground truth JSONs",
     )
     parser.add_argument(
-        "--force-claude",
-        action="store_true",
-        help="Force Claude Vision API instead of OpenCV",
-    )
-    parser.add_argument(
         "--output",
         type=Path,
         help="Save detailed results to JSON file",
@@ -352,7 +347,7 @@ def main():
     results = []
     for img_path, gt_path in pairs:
         print(f"Processing {img_path.name}...", flush=True)
-        result = evaluate_image(img_path, gt_path, force_claude=args.force_claude)
+        result = evaluate_image(img_path, gt_path)
         results.append(result)
 
     print_report(results)

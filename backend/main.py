@@ -2,7 +2,7 @@ import logging
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, Query, UploadFile
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -28,7 +28,6 @@ app.add_middleware(
 @app.post("/upload")
 async def upload_floorplan(
     file: UploadFile = File(...),
-    force_claude: bool = Query(False, description="Force Claude Vision API"),
 ):
     """Accept a floor plan image and return a JSON floorplan schema."""
     # Validate content type
@@ -61,7 +60,7 @@ async def upload_floorplan(
         ph, pw = processed.shape[:2]
 
         # Step 2: Detect rooms and doors
-        detection = detect_rooms(processed, force_claude=force_claude)
+        detection = detect_rooms(processed)
         rooms = detection["rooms"]
         doors = detection["doors"]
 
@@ -84,7 +83,7 @@ async def upload_floorplan(
         logger.exception("Pipeline error")
         return JSONResponse(
             status_code=500,
-            content={"error": "Failed to process floor plan. Try enabling Claude Vision."},
+            content={"error": "Failed to process floor plan. Try a cleaner image."},
         )
 
 

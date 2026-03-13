@@ -6,11 +6,10 @@
 # and runs accuracy evaluation.
 #
 # Usage:
-#   ./run_eval.sh              # default: 5 samples, OpenCV mode
+#   ./run_eval.sh              # default: 5 samples
 #   ./run_eval.sh --limit 20   # convert 20 samples
-#   ./run_eval.sh --claude      # use Claude Vision API
-#   ./run_eval.sh --shuffle          # pick random samples each run
-#   ./run_eval.sh --limit 10 --claude --output results.json
+#   ./run_eval.sh --shuffle    # pick random samples each run
+#   ./run_eval.sh --limit 10 --shuffle --output results.json
 
 set -euo pipefail
 
@@ -21,7 +20,6 @@ CUBICASA_DIR="$SCRIPT_DIR/.cubicasa"
 DATASET_DIR="$CUBICASA_DIR/CubiCasa5k"
 FIXTURES_DIR="$SCRIPT_DIR/tests/fixtures"
 LIMIT=5
-USE_CLAUDE=false
 SHUFFLE=false
 OUTPUT=""
 
@@ -31,10 +29,6 @@ while [[ $# -gt 0 ]]; do
         --limit)
             LIMIT="$2"
             shift 2
-            ;;
-        --claude)
-            USE_CLAUDE=true
-            shift
             ;;
         --output)
             OUTPUT="$2"
@@ -55,7 +49,6 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --limit N     Number of samples to evaluate (default: 5)"
-            echo "  --claude      Use Claude Vision API instead of OpenCV"
             echo "  --shuffle     Randomly select different samples each run"
             echo "  --output FILE Save detailed results to JSON file"
             echo "  --clean       Remove downloaded dataset and fixtures"
@@ -170,10 +163,6 @@ echo "[4/4] Running evaluation..."
 echo ""
 
 EVAL_ARGS=("--test-dir" "$FIXTURES_DIR")
-
-if [ "$USE_CLAUDE" = true ]; then
-    EVAL_ARGS+=("--force-claude")
-fi
 
 if [ -n "$OUTPUT" ]; then
     EVAL_ARGS+=("--output" "$OUTPUT")

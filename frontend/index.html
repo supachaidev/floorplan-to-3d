@@ -47,16 +47,6 @@
             font-size: 13px;
             color: #999;
         }
-        .option-group {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 13px;
-            color: #aaa;
-        }
-        .option-group input[type="checkbox"] {
-            accent-color: #2563eb;
-        }
         .panels {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -132,10 +122,6 @@
                 Upload Floor Plan
             </button>
             <input type="file" id="file-input" accept="image/*">
-            <label class="option-group">
-                <input type="checkbox" id="force-claude">
-                Use Claude Vision
-            </label>
             <span id="status"></span>
         </div>
     </header>
@@ -166,8 +152,6 @@
         const fileInput = document.getElementById("file-input");
         const statusEl = document.getElementById("status");
         const uploadBtn = document.getElementById("upload-btn");
-        const forceClaudeCheckbox = document.getElementById("force-claude");
-
         let currentFloorplan = null;
 
         fileInput.addEventListener("change", async (e) => {
@@ -201,8 +185,7 @@
             const formData = new FormData();
             formData.append("file", file);
 
-            const forceClaude = forceClaudeCheckbox.checked;
-            const url = `${API_URL}/upload?force_claude=${forceClaude}`;
+            const url = `${API_URL}/upload`;
 
             try {
                 const resp = await fetch(url, { method: "POST", body: formData });
