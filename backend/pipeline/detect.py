@@ -1,14 +1,29 @@
-import base64
-import json
 import logging
 import math
-import re
 
-import anthropic
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def _remove_small_components(binary: np.ndarray, max_frac: float = 0.003) -> np.ndarray:
+    """Remove small connected components (text, annotations, symbols).
+
+    Components smaller than max_frac of total image area are removed.
+    This prevents text labels from creating false walls/rooms.
+    """
+    h, w = binary.shape[:2]
+    max_area = w * h * max_frac
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    cleaned = binary.copy()
+    for i in range(1, num_labels):
+        if stats[i, cv2.CC_STAT_AREA] < max_area:
+            cleaned[labels == i] = 0
+    return cleaned
+
+
+_MAX_DETECT_DIM = 1200  # downscale large images for speed
 
 
 def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
@@ -20,40 +35,94 @@ def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
     Returns a list of room dicts or None if detection fails.
     """
     h, w = image.shape[:2]
+
+    # Downscale large images — detection works on relative shapes,
+    # so high resolution just wastes time.
+    scale_factor = 1.0
+    if max(h, w) > _MAX_DETECT_DIM:
+        scale_factor = _MAX_DETECT_DIM / max(h, w)
+        new_w, new_h = int(w * scale_factor), int(h * scale_factor)
+        image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        h, w = new_h, new_w
+
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     # Normalize contrast for varying image quality
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     enhanced = clahe.apply(gray)
 
+    # Prepare blurred variant to sweep over
+    blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+
     best_rooms = None
     best_score = -1.0
 
-    # Sweep threshold and morphology parameters
-    for block_size in [11, 15, 21, 31]:
-        for c_val in [3, 5, 8]:
-            for morph_k in [3, 5]:
-                rooms = _find_enclosed_rooms(
-                    enhanced, w, h, block_size, c_val, morph_k,
-                )
-                if rooms is None:
-                    continue
-                score = _score_room_set(rooms)
-                if score > best_score:
-                    best_score = score
-                    best_rooms = rooms
+    # Parameter sweep including blur variant
+    for img in [enhanced, blurred]:
+        for block_size in [11, 15, 21, 31]:
+            for c_val in [2, 4, 6, 8]:
+                for morph_k in [3, 5]:
+                    rooms = _find_enclosed_rooms(
+                        img, w, h, block_size, c_val, morph_k,
+                    )
+                    if rooms is None:
+                        continue
+                    score = _score_room_set(rooms)
+                    if score > best_score:
+                        best_score = score
+                        best_rooms = rooms
 
     if best_rooms is None:
         return None
+
+    # Merge rooms that overlap significantly (IoU > 0.5)
+    best_rooms = _merge_overlapping_rooms(best_rooms)
 
     _classify_rooms_by_geometry(best_rooms)
     return best_rooms
 
 
+def _merge_overlapping_rooms(rooms: list[dict], iou_threshold: float = 0.5) -> list[dict]:
+    """Merge room pairs that overlap significantly, keeping the larger one."""
+    if len(rooms) <= 1:
+        return rooms
+
+    size = 300
+    masks = []
+    for r in rooms:
+        mask = np.zeros((size, size), dtype=np.uint8)
+        pts = np.array(
+            [[int(p["x"] * size), int(p["y"] * size)] for p in r["polygon"]],
+            dtype=np.int32,
+        )
+        if len(pts) >= 3:
+            cv2.fillPoly(mask, [pts], 255)
+        masks.append(mask)
+
+    drop = set()
+    for i in range(len(rooms)):
+        if i in drop:
+            continue
+        for j in range(i + 1, len(rooms)):
+            if j in drop:
+                continue
+            inter = np.logical_and(masks[i], masks[j]).sum()
+            union = np.logical_or(masks[i], masks[j]).sum()
+            if union > 0 and inter / union > iou_threshold:
+                # Keep the larger room
+                if rooms[i]["_area_frac"] >= rooms[j]["_area_frac"]:
+                    drop.add(j)
+                else:
+                    drop.add(i)
+                    break
+
+    return [r for idx, r in enumerate(rooms) if idx not in drop]
+
+
 def _score_room_set(rooms: list[dict]) -> float:
     """Score a set of detected rooms by quality, not just count.
 
-    Prefers results where total room area covers 40-90% of the image
+    Prefers results where total room area covers 30-90% of the image
     with minimal mutual overlap and uniform room sizes (not fragmented).
     """
     if not rooms:
@@ -62,11 +131,11 @@ def _score_room_set(rooms: list[dict]) -> float:
     areas = [r["_area_frac"] for r in rooms]
     total_area = sum(areas)
 
-    # Penalize coverage outside the sweet spot (40-90% of image)
-    if total_area < 0.4:
-        coverage_score = total_area / 0.4
-    elif total_area > 0.9:
-        coverage_score = max(0, 1.0 - (total_area - 0.9) / 0.5)
+    # Penalize coverage outside the sweet spot (30-90% of image)
+    if total_area < 0.30:
+        coverage_score = total_area / 0.30
+    elif total_area > 0.90:
+        coverage_score = max(0, 1.0 - (total_area - 0.90) / 0.5)
     else:
         coverage_score = 1.0
 
@@ -76,7 +145,12 @@ def _score_room_set(rooms: list[dict]) -> float:
     # Penalize fragmentation: if many rooms are tiny (< 1% of image),
     # the result is likely noise from aggressive thresholding
     tiny_count = sum(1 for a in areas if a < 0.01)
-    frag_penalty = 0.3 * (tiny_count / max(len(rooms), 1))
+    frag_penalty = 0.4 * (tiny_count / max(len(rooms), 1))
+
+    # Reward room regularity — rooms with aspect ratio > 0.4 are more
+    # likely real rooms (not slivers of noise)
+    regular_count = sum(1 for r in rooms if r.get("_aspect", 0.5) > 0.4)
+    regularity_bonus = 0.15 * (regular_count / max(len(rooms), 1))
 
     # Penalize overlap between rooms using mask-based comparison
     overlap_penalty = 0.0
@@ -98,9 +172,9 @@ def _score_room_set(rooms: list[dict]) -> float:
             double_count[np.logical_and(combined > 0, m > 0)] = 255
             combined = np.maximum(combined, m)
         if combined.sum() > 0:
-            overlap_penalty = 1.5 * double_count.sum() / combined.sum()
+            overlap_penalty = 2.0 * double_count.sum() / combined.sum()
 
-    return coverage_score + count_score - frag_penalty - overlap_penalty
+    return coverage_score + count_score + regularity_bonus - frag_penalty - overlap_penalty
 
 
 def _find_enclosed_rooms(
@@ -114,9 +188,20 @@ def _find_enclosed_rooms(
         cv2.THRESH_BINARY_INV, block_size, c_val,
     )
 
-    # Close small gaps in walls, then dilate to seal door openings
+    # Remove small connected components (text/annotations) before closing
+    binary = _remove_small_components(binary)
+
+    # Close small gaps in walls using both square and directional kernels
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_k, morph_k))
     walls = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    # Use directional kernels to reconnect horizontal/vertical wall segments
+    h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_k * 2 + 1, 1))
+    v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, morph_k * 2 + 1))
+    walls_h = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, h_kernel, iterations=1)
+    walls_v = cv2.morphologyEx(walls, cv2.MORPH_CLOSE, v_kernel, iterations=1)
+    walls = cv2.bitwise_or(walls_h, walls_v)
+
     walls = cv2.dilate(walls, kernel, iterations=1)
 
     # Invert: rooms become white (255), walls become black (0)
@@ -241,7 +326,6 @@ def _classify_rooms_by_geometry(rooms: list[dict]) -> None:
 
 
 # Door detection thresholds — moderately relaxed for imperfect arcs
-_DOOR_MIN_AREA = 80
 _DOOR_ASPECT_MIN = 0.55
 _DOOR_BBOX_FILL_MIN = 0.45
 _DOOR_BBOX_FILL_MAX = 0.88
@@ -250,6 +334,8 @@ _DOOR_QTR_AREA_RATIO_MAX = 1.20
 _DOOR_SOLIDITY_MIN = 0.80
 _DOOR_RADIUS_FRAC_MIN = 0.02   # fraction of max image dimension
 _DOOR_RADIUS_FRAC_MAX = 0.15
+# Minimum distance (normalized) between distinct doors
+_DOOR_DEDUP_DIST = 0.025
 
 
 def detect_doors_cv(image: np.ndarray) -> list[dict]:
@@ -274,12 +360,13 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
     max_dim = max(w, h)
     min_radius = max_dim * _DOOR_RADIUS_FRAC_MIN
     max_radius = max_dim * _DOOR_RADIUS_FRAC_MAX
+    min_area = 80
 
-    doors = []
+    candidates = []
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < _DOOR_MIN_AREA:
+        if area < min_area:
             continue
 
         bx, by, bw, bh = cv2.boundingRect(cnt)
@@ -345,164 +432,44 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
         dists = np.sqrt((pts[:, 0] - hinge[0]) ** 2 + (pts[:, 1] - hinge[1]) ** 2)
         radius = float(np.max(dists))
 
-        doors.append({
-            "id": f"door_{len(doors) + 1}",
+        candidates.append({
             "position": {
                 "x": round(float(hinge[0]) / w, 4),
                 "y": round(float(hinge[1]) / h, 4),
             },
             "width": round(radius / max_dim, 4),
             "angle": round(arc_angle % 360, 1),
+            "_area": area,
         })
+
+    # Deduplicate nearby doors — keep the one with larger area
+    candidates.sort(key=lambda d: d["_area"], reverse=True)
+    doors = []
+    for cand in candidates:
+        too_close = False
+        for existing in doors:
+            dx = cand["position"]["x"] - existing["position"]["x"]
+            dy = cand["position"]["y"] - existing["position"]["y"]
+            if math.sqrt(dx * dx + dy * dy) < _DOOR_DEDUP_DIST:
+                too_close = True
+                break
+        if not too_close:
+            doors.append({
+                "id": f"door_{len(doors) + 1}",
+                "position": cand["position"],
+                "width": cand["width"],
+                "angle": cand["angle"],
+            })
 
     return doors
 
 
-def _extract_json(text: str) -> str:
-    """Extract JSON from Claude response, handling markdown fences."""
-    # Try to find JSON in fenced code block
-    match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+def detect_rooms(image: np.ndarray) -> dict:
+    """Detect rooms and doors using OpenCV.
 
-
-def detect_rooms_claude(image: np.ndarray) -> dict:
-    """Use Claude Vision API to detect rooms AND doors from the floor plan image."""
-    success, buf = cv2.imencode(".png", image)
-    if not success:
-        raise RuntimeError("Failed to encode image as PNG")
-
-    b64 = base64.b64encode(buf).decode("utf-8")
-
-    client = anthropic.Anthropic()
-
-    prompt = (
-        "This is a 2D architectural floor plan image. Analyze it carefully and return ONLY a JSON object "
-        "with two arrays: \"rooms\" and \"doors\".\n\n"
-        "For each ROOM provide:\n"
-        "- label: room name in English (e.g. Bedroom, Bathroom, Kitchen, Living Room)\n"
-        "- polygon: array of {x, y} normalized coordinates (0.0 to 1.0) relative to image width/height, "
-        "tracing the room boundary corners clockwise\n"
-        "- type: one of bedroom/bathroom/kitchen/living/dining/hallway/closet/balcony/other\n\n"
-        "For each DOOR (the quarter-circle arc symbols in the floor plan):\n"
-        "- position: {x, y} normalized coordinates (0.0 to 1.0) of the door HINGE point. "
-        "The hinge is where the arc's two straight radii meet - the pivot corner of the door, "
-        "which sits on the wall at the edge of the door opening. Look for the point where the "
-        "quarter-circle arc originates from.\n"
-        "- width: the door width as a fraction of image width (the radius of the arc, typically 0.03-0.08)\n"
-        "- angle: the direction from hinge toward the CENTER of the arc sweep, in degrees "
-        "(0=right, 90=down, 180=left, 270=up). This is the midpoint of the arc's angular range.\n"
-        "- connects: array of two room labels this door connects (e.g. [\"Bedroom\", \"Hallway\"])\n\n"
-        "IMPORTANT: Look carefully at every quarter-circle arc in the image - each one is a door. "
-        "The hinge point must be precisely at the corner where the arc starts, on the wall.\n\n"
-        "Return only valid JSON: {\"rooms\": [...], \"doors\": [...]}\n"
-        "No explanation, no markdown fences."
-    )
-
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=4096,
-            timeout=60.0,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": b64,
-                            },
-                        },
-                        {"type": "text", "text": prompt},
-                    ],
-                }
-            ],
-        )
-    except anthropic.APIError as e:
-        raise RuntimeError(f"Claude API error: {e}") from e
-
-    if not response.content:
-        raise RuntimeError("Claude returned empty response")
-
-    text = response.content[0].text.strip()
-    text = _extract_json(text)
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        logger.error("Claude returned invalid JSON: %s", text[:500])
-        raise RuntimeError(f"Claude returned invalid JSON: {e}") from e
-
-    # Handle both formats: {rooms, doors} or just an array of rooms
-    if isinstance(data, list):
-        raw_rooms = data
-        raw_doors = []
-    else:
-        raw_rooms = data.get("rooms", [])
-        raw_doors = data.get("doors", [])
-
-    # Normalize rooms
-    rooms = []
-    for room in raw_rooms:
-        polygon = room.get("polygon", [])
-        normalized_polygon = []
-        for pt in polygon:
-            if isinstance(pt, list):
-                normalized_polygon.append({"x": round(pt[0], 4), "y": round(pt[1], 4)})
-            elif isinstance(pt, dict):
-                normalized_polygon.append({
-                    "x": round(pt.get("x", 0), 4),
-                    "y": round(pt.get("y", 0), 4),
-                })
-        rooms.append({
-            "label": room.get("label", "Room"),
-            "polygon": normalized_polygon,
-            "type": room.get("type", "other"),
-        })
-
-    # Normalize doors
-    doors = []
-    for i, door in enumerate(raw_doors):
-        pos = door.get("position", {})
-        if isinstance(pos, list):
-            pos = {"x": pos[0], "y": pos[1]}
-        connects = door.get("connects", [])
-        doors.append({
-            "id": f"door_{i + 1}",
-            "position": {
-                "x": round(pos.get("x", 0), 4),
-                "y": round(pos.get("y", 0), 4),
-            },
-            "width": round(door.get("width", 0.05), 4),
-            "angle": door.get("angle", 0),
-            "connects": connects,
-        })
-
-    return {"rooms": rooms, "doors": doors}
-
-
-def detect_rooms(image: np.ndarray, force_claude: bool = False) -> dict:
-    """Detect rooms and doors. Returns {"rooms": [...], "doors": [...]}.
-
-    Uses OpenCV first, falls back to Claude Vision API.
+    Returns {"rooms": [...], "doors": [...]}.
+    Returns empty rooms list if detection fails.
     """
-    if not force_claude:
-        cv_rooms = detect_rooms_cv(image)
-        if cv_rooms is not None:
-            cv_doors = detect_doors_cv(image)
-            return {"rooms": cv_rooms, "doors": cv_doors}
-
-    try:
-        return detect_rooms_claude(image)
-    except (TypeError, RuntimeError) as e:
-        if "authentication" in str(e).lower() or "api_key" in str(e).lower():
-            raise RuntimeError(
-                "OpenCV detected fewer than 2 rooms and Claude Vision API "
-                "key is not configured. Set ANTHROPIC_API_KEY or try a "
-                "cleaner floor plan image."
-            ) from e
-        raise
+    cv_rooms = detect_rooms_cv(image)
+    cv_doors = detect_doors_cv(image)
+    return {"rooms": cv_rooms or [], "doors": cv_doors}
