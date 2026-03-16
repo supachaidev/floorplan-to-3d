@@ -1,8 +1,9 @@
 import logging
+import tempfile
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -84,6 +85,63 @@ async def upload_floorplan(
         return JSONResponse(
             status_code=500,
             content={"error": "Failed to process floor plan. Try a cleaner image."},
+        )
+
+
+@app.post("/upload-vlm")
+async def upload_floorplan_vlm(
+    file: UploadFile = File(...),
+    model: str = Query("Qwen/Qwen2.5-VL-7B-Instruct", description="VLM model name"),
+):
+    """Accept a floor plan image and return wall-first JSON via Qwen2.5-VL."""
+    if file.content_type and not file.content_type.startswith("image/"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Expected image file, got {file.content_type}"},
+        )
+
+    contents = await file.read()
+    if len(contents) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB"},
+        )
+
+    np_arr = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Could not decode image"},
+        )
+
+    try:
+        from pipeline.vlm_vectorize import vectorize_floorplan_from_array
+
+        # Convert BGR (OpenCV) to RGB (PIL)
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        result = vectorize_floorplan_from_array(image_rgb, model_name=model)
+
+        if result is None:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "VLM failed to produce valid JSON. Try a cleaner image."},
+            )
+
+        return result
+
+    except RuntimeError as e:
+        logger.exception("VLM dependency error")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
+    except Exception:
+        logger.exception("VLM pipeline error")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "VLM processing failed. Try a cleaner image."},
         )
 
 

@@ -88,6 +88,8 @@
     }
 
     // ── data ────────────────────────────────────────────────────────
+    let isVlmSchema = false;
+
     function loadImage(url, floorplan) {
         const img = new Image();
         img.onload = () => { bgImage = img; floorplanData = floorplan; buildWorkingCopy(); computeImageRect(); resizeCanvas(); };
@@ -96,6 +98,88 @@
 
     function buildWorkingCopy() {
         if (!floorplanData) return;
+
+        // Detect VLM wall-first schema vs OpenCV room-polygon schema
+        isVlmSchema = !!floorplanData.walls;
+
+        if (isVlmSchema) {
+            buildVlmWorkingCopy();
+        } else {
+            buildOpenCvWorkingCopy();
+        }
+    }
+
+    function buildVlmWorkingCopy() {
+        const ppm = floorplanData.scale?.pixels_per_meter || 50;
+        const vlmRooms = floorplanData.rooms || [];
+
+        // Compute bounds from wall coordinates (in meters)
+        let boundsX = 0, boundsY = 0;
+        for (const w of (floorplanData.walls || [])) {
+            boundsX = Math.max(boundsX, w.start[0] / ppm, w.end[0] / ppm);
+            boundsY = Math.max(boundsY, w.start[1] / ppm, w.end[1] / ppm);
+        }
+        // Add small margin
+        boundsX *= 1.05;
+        boundsY *= 1.05;
+
+        // Convert VLM rooms to editor format (polygon with {x,y} objects)
+        rooms = vlmRooms.map(r => {
+            const poly = (r.floor_polygon || []).map(p => ({
+                x: p[0] / ppm,
+                y: p[1] / ppm,
+            }));
+            // Classify room type from label
+            const label = r.label || "Room";
+            const typeLower = label.toLowerCase();
+            let type = "other";
+            if (typeLower.includes("bed")) type = "bedroom";
+            else if (typeLower.includes("bath") || typeLower.includes("toilet")) type = "bathroom";
+            else if (typeLower.includes("kitchen")) type = "kitchen";
+            else if (typeLower.includes("living")) type = "living";
+            else if (typeLower.includes("dining")) type = "dining";
+            else if (typeLower.includes("hall") || typeLower.includes("corridor")) type = "hallway";
+            else if (typeLower.includes("closet") || typeLower.includes("storage")) type = "closet";
+            else if (typeLower.includes("balcon")) type = "balcony";
+            return {
+                id: r.id,
+                label: label,
+                type: type,
+                height: 3.0,
+                polygon: poly,
+            };
+        });
+
+        // Convert VLM openings to editor door format
+        const openings = floorplanData.openings || [];
+        const wallMap = {};
+        for (const w of (floorplanData.walls || [])) wallMap[w.id] = w;
+
+        doors = openings.filter(o => o.type === "door").map(o => {
+            const wall = wallMap[o.wall_id];
+            if (!wall) return null;
+            // Calculate door position along wall
+            const wx = wall.start[0], wy = wall.start[1];
+            const dx = wall.end[0] - wx, dy = wall.end[1] - wy;
+            const wLen = Math.sqrt(dx * dx + dy * dy);
+            const t = wLen > 0 ? (o.position || 0) / wLen : 0.5;
+            const posX = (wx + dx * t) / ppm;
+            const posY = (wy + dy * t) / ppm;
+            const angle = Math.atan2(dy, dx) * 180 / Math.PI;
+            return {
+                id: o.id,
+                position: { x: posX, y: posY },
+                width: (o.width || 90) / ppm,
+                angle: angle,
+                connects: [],
+            };
+        }).filter(Boolean);
+
+        rooms._boundsX = boundsX || 1;
+        rooms._boundsY = boundsY || 1;
+    }
+
+    function buildOpenCvWorkingCopy() {
         const fp = floorplanData.floorplan;
 
         // Use full image dimensions (meters) as bounds so polygons align
@@ -447,14 +531,32 @@
     function getFloorplanData() {
         if (!floorplanData) return null;
         const edited = JSON.parse(JSON.stringify(floorplanData));
-        edited.floorplan.rooms = rooms.map(r => ({
-            id: r.id, label: r.label, height: r.height, type: r.type,
-            polygon: r.polygon.map(p => ({ x: Math.round(p.x * 100) / 100, y: Math.round(p.y * 100) / 100 })),
-        }));
-        edited.floorplan.doors = doors.map(d => ({
-            id: d.id, width: d.width, angle: d.angle, connects: d.connects || [],
-            position: { x: Math.round(d.position.x * 100) / 100, y: Math.round(d.position.y * 100) / 100 },
-        }));
+
+        if (isVlmSchema) {
+            // Update VLM schema rooms with edited polygons
+            const ppm = edited.scale?.pixels_per_meter || 50;
+            edited.rooms = rooms.map((r, i) => {
+                const orig = edited.rooms[i] || {};
+                return {
+                    ...orig,
+                    id: r.id,
+                    label: r.label,
+                    floor_polygon: r.polygon.map(p => [
+                        Math.round(p.x * ppm * 100) / 100,
+                        Math.round(p.y * ppm * 100) / 100,
+                    ]),
+                };
+            });
+        } else {
+            edited.floorplan.rooms = rooms.map(r => ({
+                id: r.id, label: r.label, height: r.height, type: r.type,
+                polygon: r.polygon.map(p => ({ x: Math.round(p.x * 100) / 100, y: Math.round(p.y * 100) / 100 })),
+            }));
+            edited.floorplan.doors = doors.map(d => ({
+                id: d.id, width: d.width, angle: d.angle, connects: d.connects || [],
+                position: { x: Math.round(d.position.x * 100) / 100, y: Math.round(d.position.y * 100) / 100 },
+            }));
+        }
         return edited;
     }
 

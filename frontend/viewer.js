@@ -184,6 +184,12 @@
         init();
         clearScene();
 
+        // Detect schema: VLM wall-first vs OpenCV room-polygon
+        if (floorplanData.walls) {
+            renderVlmSchema(floorplanData);
+            return;
+        }
+
         const rooms = floorplanData.floorplan.rooms;
         const doors = floorplanData.floorplan.doors || [];
         if (!rooms.length) return;
@@ -423,6 +429,211 @@
         const bbox = new THREE.Box3();
         scene.traverse((obj) => {
             if (obj.userData.isFloorplan && (obj.isMesh || obj.isLine)) {
+                bbox.expandByObject(obj);
+            }
+        });
+        if (!bbox.isEmpty()) {
+            const center = new THREE.Vector3();
+            bbox.getCenter(center);
+            const size = bbox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            camera.position.set(
+                center.x + maxDim,
+                maxDim * 1.2,
+                center.z + maxDim,
+            );
+            controls.target.copy(center);
+            controls.update();
+        }
+    }
+
+    /**
+     * Render the VLM wall-first schema where walls are independent primitives,
+     * rooms reference wall IDs, and openings reference parent walls.
+     */
+    function renderVlmSchema(data) {
+        const ppm = data.scale?.pixels_per_meter || 50;
+        const walls = data.walls || [];
+        const rooms = data.rooms || [];
+        const openings = data.openings || [];
+        const wallHeight = 2.8; // meters
+
+        if (!walls.length) return;
+
+        // Build wall lookup
+        const wallMap = {};
+        for (const w of walls) wallMap[w.id] = w;
+
+        // Build opening lookup by wall_id
+        const openingsByWall = {};
+        for (const o of openings) {
+            if (!openingsByWall[o.wall_id]) openingsByWall[o.wall_id] = [];
+            openingsByWall[o.wall_id].push(o);
+        }
+
+        // Find centroid for centering (in meters)
+        let cx = 0, cz = 0, count = 0;
+        for (const wall of walls) {
+            cx += wall.start[0] / ppm;
+            cz += wall.start[1] / ppm;
+            cx += wall.end[0] / ppm;
+            cz += wall.end[1] / ppm;
+            count += 2;
+        }
+        cx /= count;
+        cz /= count;
+
+        const wallMat = new THREE.MeshPhongMaterial({
+            color: 0xcccccc,
+            opacity: 0.85,
+            transparent: true,
+            side: THREE.DoubleSide,
+        });
+
+        const doorFrameMat = new THREE.MeshPhongMaterial({
+            color: 0x8B4513,
+            opacity: 0.9,
+            transparent: true,
+        });
+
+        // Draw walls with openings cut out
+        for (const wall of walls) {
+            const x1 = wall.start[0] / ppm - cx;
+            const z1 = -(wall.start[1] / ppm - cz);
+            const x2 = wall.end[0] / ppm - cx;
+            const z2 = -(wall.end[1] / ppm - cz);
+            const thickness = (wall.thickness || 20) / ppm;
+
+            const edgeDx = x2 - x1, edgeDz = z2 - z1;
+            const wallLen = Math.sqrt(edgeDx * edgeDx + edgeDz * edgeDz);
+            if (wallLen < 0.01) continue;
+
+            const nx = -edgeDz / wallLen * (thickness / 2);
+            const nz = edgeDx / wallLen * (thickness / 2);
+
+            const wallOpenings = openingsByWall[wall.id] || [];
+
+            if (wallOpenings.length === 0) {
+                scene.add(makeWallMesh(x1, z1, x2, z2, 0, wallHeight, nx, nz, wallMat));
+            } else {
+                // Sort openings by position along wall
+                wallOpenings.sort((a, b) => a.position - b.position);
+
+                let prevT = 0;
+                for (const opening of wallOpenings) {
+                    const posM = opening.position / ppm;
+                    const widthM = (opening.width || 90) / ppm;
+                    const startT = Math.max(0, (posM - widthM / 2) / wallLen);
+                    const endT = Math.min(1, (posM + widthM / 2) / wallLen);
+
+                    const openingHeight = opening.type === "door" ? DOOR_HEIGHT : wallHeight * 0.6;
+
+                    // Solid wall before opening
+                    if (startT > prevT + 0.001) {
+                        const sx = x1 + edgeDx * prevT, sz = z1 + edgeDz * prevT;
+                        const ex = x1 + edgeDx * startT, ez = z1 + edgeDz * startT;
+                        scene.add(makeWallMesh(sx, sz, ex, ez, 0, wallHeight, nx, nz, wallMat));
+                    }
+
+                    // Lintel above opening
+                    if (openingHeight < wallHeight) {
+                        const sx = x1 + edgeDx * startT, sz = z1 + edgeDz * startT;
+                        const ex = x1 + edgeDx * endT, ez = z1 + edgeDz * endT;
+                        scene.add(makeWallMesh(sx, sz, ex, ez, openingHeight, wallHeight, nx, nz, wallMat));
+                    }
+
+                    // Wall below window
+                    if (opening.type === "window") {
+                        const sillHeight = wallHeight * 0.3;
+                        const sx = x1 + edgeDx * startT, sz = z1 + edgeDz * startT;
+                        const ex = x1 + edgeDx * endT, ez = z1 + edgeDz * endT;
+                        scene.add(makeWallMesh(sx, sz, ex, ez, 0, sillHeight, nx, nz, wallMat));
+
+                        // Window glass
+                        const glassMat = new THREE.MeshPhongMaterial({
+                            color: 0x88ccff,
+                            opacity: 0.3,
+                            transparent: true,
+                            side: THREE.DoubleSide,
+                        });
+                        scene.add(makeWallMesh(sx, sz, ex, ez, sillHeight, openingHeight, 0, 0, glassMat));
+                    }
+
+                    // Door frame for doors
+                    if (opening.type === "door") {
+                        const midT = (startT + endT) / 2;
+                        const hx = x1 + edgeDx * midT;
+                        const hz = z1 + edgeDz * midT;
+
+                        // Door panel
+                        const doorMat = new THREE.MeshPhongMaterial({
+                            color: 0xDEB887,
+                            opacity: 0.85,
+                            transparent: true,
+                            side: THREE.DoubleSide,
+                        });
+                        const doorAngle = Math.atan2(-edgeDz, edgeDx);
+                        const panelGeo = new THREE.BoxGeometry(widthM, DOOR_HEIGHT, 0.05);
+                        const panel = new THREE.Mesh(panelGeo, doorMat);
+                        panel.position.set(hx, DOOR_HEIGHT / 2, hz);
+                        panel.rotation.y = -doorAngle;
+                        panel.userData.isFloorplan = true;
+                        scene.add(panel);
+                    }
+
+                    prevT = endT;
+                }
+
+                // Solid wall after last opening
+                if (prevT < 1 - 0.001) {
+                    const sx = x1 + edgeDx * prevT, sz = z1 + edgeDz * prevT;
+                    scene.add(makeWallMesh(sx, sz, x2, z2, 0, wallHeight, nx, nz, wallMat));
+                }
+            }
+        }
+
+        // Draw floors from room polygons
+        for (const room of rooms) {
+            const poly = room.floor_polygon;
+            if (!poly || poly.length < 3) continue;
+
+            const shape = new THREE.Shape();
+            shape.moveTo(poly[0][0] / ppm - cx, -(poly[0][1] / ppm - cz));
+            for (let i = 1; i < poly.length; i++) {
+                shape.lineTo(poly[i][0] / ppm - cx, -(poly[i][1] / ppm - cz));
+            }
+
+            const geo = new THREE.ShapeGeometry(shape);
+            const matConfig = ROOM_MATERIALS[room.label?.toLowerCase()] || ROOM_MATERIALS.other;
+            const mat = new THREE.MeshPhongMaterial({
+                color: matConfig.color,
+                opacity: 0.3,
+                transparent: true,
+                side: THREE.DoubleSide,
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.y = 0.01;
+            mesh.userData.isFloorplan = true;
+            scene.add(mesh);
+
+            // Room label
+            if (room.label) {
+                let lx = 0, lz = 0;
+                for (const p of poly) { lx += p[0] / ppm; lz += p[1] / ppm; }
+                lx = lx / poly.length - cx;
+                lz = -(lz / poly.length - cz);
+                const sprite = makeTextSprite(room.label);
+                sprite.position.set(lx, wallHeight + 0.5, lz);
+                sprite.userData.isFloorplan = true;
+                scene.add(sprite);
+            }
+        }
+
+        // Fit camera
+        const bbox = new THREE.Box3();
+        scene.traverse((obj) => {
+            if (obj.userData.isFloorplan && (obj.isMesh || obj.isLine || obj.isSprite)) {
                 bbox.expandByObject(obj);
             }
         });

@@ -118,6 +118,10 @@
     <header>
         <h1>Floorplan to 3D</h1>
         <div class="upload-area">
+            <select id="pipeline-select" style="background:#222;color:#e0e0e0;border:1px solid #555;padding:6px 10px;border-radius:6px;font-size:13px;">
+                <option value="opencv">OpenCV Pipeline</option>
+                <option value="vlm">VLM (Qwen2.5-VL)</option>
+            </select>
             <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">
                 Upload Floor Plan
             </button>
@@ -179,13 +183,17 @@
         });
 
         async function processFile(file) {
-            statusEl.textContent = "Uploading and processing...";
+            const pipeline = document.getElementById("pipeline-select").value;
+            statusEl.textContent = pipeline === "vlm"
+                ? "Processing with VLM (this may take a while)..."
+                : "Uploading and processing...";
             uploadBtn.disabled = true;
 
             const formData = new FormData();
             formData.append("file", file);
 
-            const url = `${API_URL}/upload`;
+            const endpoint = pipeline === "vlm" ? "/upload-vlm" : "/upload";
+            const url = `${API_URL}${endpoint}`;
 
             try {
                 const resp = await fetch(url, { method: "POST", body: formData });
@@ -195,12 +203,23 @@
                     throw new Error(msg);
                 }
                 currentFloorplan = await resp.json();
-                if (!currentFloorplan?.floorplan?.rooms) {
-                    throw new Error("Invalid response from server");
+
+                // Detect schema type: VLM (wall-first) vs OpenCV (room-polygon)
+                const isVlmSchema = !!currentFloorplan.walls;
+
+                if (isVlmSchema) {
+                    const nWalls = currentFloorplan.walls.length;
+                    const nRooms = currentFloorplan.rooms.length;
+                    const nOpenings = (currentFloorplan.openings || []).length;
+                    statusEl.textContent = `VLM: ${nWalls} walls, ${nRooms} rooms, ${nOpenings} openings`;
+                } else {
+                    if (!currentFloorplan?.floorplan?.rooms) {
+                        throw new Error("Invalid response from server");
+                    }
+                    const nRooms = currentFloorplan.floorplan.rooms.length;
+                    const nDoors = (currentFloorplan.floorplan.doors || []).length;
+                    statusEl.textContent = `Detected ${nRooms} rooms, ${nDoors} doors`;
                 }
-                const nRooms = currentFloorplan.floorplan.rooms.length;
-                const nDoors = (currentFloorplan.floorplan.doors || []).length;
-                statusEl.textContent = `Detected ${nRooms} rooms, ${nDoors} doors`;
 
                 // Load image for 2D editor
                 const imgUrl = URL.createObjectURL(file);
