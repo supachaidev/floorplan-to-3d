@@ -2,31 +2,44 @@
 
 Upload a 2D floor plan image, automatically detect rooms and doors, edit boundaries interactively, and visualize in 3D.
 
+Two detection pipelines are available:
+
+- **OpenCV pipeline** — classical image processing for clean printed plans
+- **VLM pipeline** — Qwen2.5-VL vision-language model for structured vectorization with a wall-first schema
+
 ## Architecture
 
 ```
 Floor plan image
       |
-  FastAPI /upload
-      |
-  Preprocess (deskew) -> Detect rooms & doors -> Simplify polygons -> Normalize to meters
+  ┌───────────────────────────┐
+  │  FastAPI /upload           │  OpenCV pipeline
+  │  Preprocess → Detect rooms │  (deskew, contours, polygon simplification)
+  │  & doors → Simplify →     │
+  │  Normalize to meters       │
+  └───────────────────────────┘
+              OR
+  ┌───────────────────────────┐
+  │  FastAPI /upload-vlm       │  VLM pipeline
+  │  Qwen2.5-VL structured    │  (walls → rooms → openings)
+  │  extraction                │
+  └───────────────────────────┘
       |
   JSON response
       |
   Frontend: 2D editor (Canvas) + 3D viewer (Three.js)
 ```
 
-**Detection pipeline:** OpenCV for clean printed plans, Claude Vision API as fallback for complex/hand-drawn plans.
-
 ## Project Structure
 
 ```
 backend/
-  main.py                  # FastAPI server (POST /upload, GET /health)
+  main.py                  # FastAPI server (POST /upload, POST /upload-vlm, GET /health)
   requirements.txt
   pipeline/
     preprocess.py           # Deskew & perspective correction
-    detect.py               # Room/door detection (OpenCV + Claude Vision)
+    detect.py               # Room/door detection (pure OpenCV)
+    vlm_vectorize.py        # VLM-based vectorization (Qwen2.5-VL)
     polygons.py             # Polygon simplification & meter normalization
     export.py               # Final JSON schema builder
   evaluate.py               # Accuracy evaluation against ground truth
@@ -34,9 +47,9 @@ backend/
   run_eval.sh               # End-to-end evaluation pipeline
 
 frontend/
-  index.html                # Split-panel UI
+  index.html                # Split-panel UI with pipeline selector
   editor.js                 # 2D interactive polygon editor (Canvas)
-  viewer.js                 # 3D room visualization (Three.js)
+  viewer.js                 # 3D room & wall visualization (Three.js)
 ```
 
 ## Getting Started
@@ -51,7 +64,11 @@ uvicorn main:app --reload
 
 Server starts at `http://localhost:8000`.
 
-Set `ANTHROPIC_API_KEY` environment variable to enable Claude Vision fallback.
+To use the VLM pipeline, install the optional dependencies (requires a CUDA-capable GPU):
+
+```bash
+pip install transformers>=4.45.0 torch>=2.0.0 accelerate qwen-vl-utils
+```
 
 ### Frontend
 
@@ -68,12 +85,20 @@ Open `http://localhost:5500` in your browser.
 
 ### `POST /upload`
 
-Upload a floor plan image. Returns detected rooms and doors as JSON.
+Upload a floor plan image. Detects rooms and doors using the OpenCV pipeline.
 
-| Parameter     | Type  | Description                          |
-|---------------|-------|--------------------------------------|
-| `file`        | file  | Image file (PNG, JPG, BMP, TIFF)     |
-| `force_claude`| query | Set `true` to use Claude Vision API  |
+| Parameter | Type | Description                      |
+|-----------|------|----------------------------------|
+| `file`    | file | Image file (PNG, JPG, BMP, TIFF) |
+
+### `POST /upload-vlm`
+
+Upload a floor plan image. Extracts walls, rooms, and openings using the Qwen2.5-VL model.
+
+| Parameter | Type  | Description                                |
+|-----------|-------|--------------------------------------------|
+| `file`    | file  | Image file (PNG, JPG, BMP, TIFF)           |
+| `model`   | query | Model name (default: `Qwen/Qwen2.5-VL-3B-Instruct`) |
 
 ### `GET /health`
 
