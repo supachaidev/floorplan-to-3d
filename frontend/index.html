@@ -42,6 +42,9 @@
         }
         .upload-btn:hover { background: #1d4ed8; }
         .upload-btn:disabled { background: #555; cursor: not-allowed; }
+        #process-btn { background: #16a34a; }
+        #process-btn:hover { background: #15803d; }
+        #process-btn:disabled { background: #555; cursor: not-allowed; }
         #file-input { display: none; }
         #status {
             font-size: 13px;
@@ -120,12 +123,15 @@
         <div class="upload-area">
             <select id="pipeline-select" style="background:#222;color:#e0e0e0;border:1px solid #555;padding:6px 10px;border-radius:6px;font-size:13px;">
                 <option value="opencv">OpenCV Pipeline</option>
-                <option value="vlm">VLM (Qwen2.5-VL)</option>
+                <option value="vlm">VLM (Gemini)</option>
             </select>
             <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">
-                Upload Floor Plan
+                Choose Image
             </button>
             <input type="file" id="file-input" accept="image/*">
+            <button class="upload-btn" id="process-btn" style="background:#16a34a;display:none;" onclick="reprocess()">
+                Detect Rooms
+            </button>
             <span id="status"></span>
         </div>
     </header>
@@ -135,8 +141,8 @@
             <div class="panel-label">2D Editor</div>
             <canvas id="canvas-2d"></canvas>
             <div class="toolbar" id="editor-toolbar" style="display:none;">
-                <button onclick="window.editor.resetPolygons()">Reset</button>
-                <button onclick="window.editor.confirmAndRender3D()">Confirm & View 3D</button>
+                <button onclick="window.editor.resetPolygons()">Reset Edits</button>
+                <button onclick="window.editor.confirmAndRender3D()">Generate 3D</button>
             </div>
         </div>
         <div class="panel">
@@ -156,13 +162,25 @@
         const fileInput = document.getElementById("file-input");
         const statusEl = document.getElementById("status");
         const uploadBtn = document.getElementById("upload-btn");
+        const processBtn = document.getElementById("process-btn");
         let currentFloorplan = null;
+        let selectedFile = null;
 
-        fileInput.addEventListener("change", async (e) => {
+        fileInput.addEventListener("change", (e) => {
             const file = e.target.files[0];
             if (!file) return;
-            await processFile(file);
+            selectedFile = file;
+            statusEl.textContent = `Selected: ${file.name}`;
+            processBtn.style.display = "inline-block";
+            // Show image preview in 2D editor
+            const imgUrl = URL.createObjectURL(file);
+            window.editor.loadImage(imgUrl, null);
         });
+
+        async function reprocess() {
+            if (!selectedFile) return;
+            await processFile(selectedFile);
+        }
 
         // Drag and drop
         const dropOverlay = document.getElementById("drop-overlay");
@@ -173,21 +191,26 @@
         document.addEventListener("dragleave", (e) => {
             if (e.relatedTarget === null) dropOverlay.classList.remove("active");
         });
-        document.addEventListener("drop", async (e) => {
+        document.addEventListener("drop", (e) => {
             e.preventDefault();
             dropOverlay.classList.remove("active");
             const file = e.dataTransfer.files[0];
             if (file && file.type.startsWith("image/")) {
-                await processFile(file);
+                selectedFile = file;
+                statusEl.textContent = `Selected: ${file.name}`;
+                processBtn.style.display = "inline-block";
+                const imgUrl = URL.createObjectURL(file);
+                window.editor.loadImage(imgUrl, null);
             }
         });
 
         async function processFile(file) {
             const pipeline = document.getElementById("pipeline-select").value;
             statusEl.textContent = pipeline === "vlm"
-                ? "Processing with VLM (this may take a while)..."
+                ? "Processing with Gemini VLM..."
                 : "Uploading and processing...";
             uploadBtn.disabled = true;
+            processBtn.disabled = true;
 
             const formData = new FormData();
             formData.append("file", file);
@@ -221,7 +244,7 @@
                     statusEl.textContent = `Detected ${nRooms} rooms, ${nDoors} doors`;
                 }
 
-                // Load image for 2D editor
+                // Update 2D editor with detected data
                 const imgUrl = URL.createObjectURL(file);
                 window.editor.loadImage(imgUrl, currentFloorplan);
                 document.getElementById("editor-toolbar").style.display = "flex";
@@ -233,6 +256,7 @@
                 statusEl.textContent = `Error: ${err.message}`;
             } finally {
                 uploadBtn.disabled = false;
+                processBtn.disabled = false;
             }
         }
     </script>
