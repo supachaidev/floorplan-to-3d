@@ -67,7 +67,7 @@ Server starts at `http://localhost:8000`.
 To use the VLM pipeline, install the optional dependencies (requires a CUDA-capable GPU):
 
 ```bash
-pip install transformers>=4.45.0 torch>=2.0.0 accelerate qwen-vl-utils
+pip install transformers>=4.45.0 torch>=2.0.0 torchvision>=0.15.0 accelerate qwen-vl-utils
 ```
 
 ### Frontend

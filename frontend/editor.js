@@ -110,24 +110,19 @@
     }
 
     function buildVlmWorkingCopy() {
-        const ppm = floorplanData.scale?.pixels_per_meter || 50;
         const vlmRooms = floorplanData.rooms || [];
 
-        // Compute bounds from wall coordinates (in meters)
-        let boundsX = 0, boundsY = 0;
-        for (const w of (floorplanData.walls || [])) {
-            boundsX = Math.max(boundsX, w.start[0] / ppm, w.end[0] / ppm);
-            boundsY = Math.max(boundsY, w.start[1] / ppm, w.end[1] / ppm);
-        }
-        // Add small margin
-        boundsX *= 1.05;
-        boundsY *= 1.05;
+        // VLM coordinates are normalized 0.0–1.0 fractions of image dimensions.
+        // Bounds are 1.0 so toScreen maps directly to the displayed image rect.
+        let boundsX = 1.0;
+        let boundsY = 1.0;
 
         // Convert VLM rooms to editor format (polygon with {x,y} objects)
+        // Coordinates are already in pixels — use them directly.
         rooms = vlmRooms.map(r => {
             const poly = (r.floor_polygon || []).map(p => ({
-                x: p[0] / ppm,
-                y: p[1] / ppm,
+                x: p[0],
+                y: p[1],
             }));
             // Classify room type from label
             const label = r.label || "Room";
@@ -151,6 +146,7 @@
         });
 
         // Convert VLM openings to editor door format
+        // All coordinates stay in pixels to match the image.
         const openings = floorplanData.openings || [];
         const wallMap = {};
         for (const w of (floorplanData.walls || [])) wallMap[w.id] = w;
@@ -158,18 +154,18 @@
         doors = openings.filter(o => o.type === "door").map(o => {
             const wall = wallMap[o.wall_id];
             if (!wall) return null;
-            // Calculate door position along wall
+            // Calculate door position along wall (in pixels)
             const wx = wall.start[0], wy = wall.start[1];
             const dx = wall.end[0] - wx, dy = wall.end[1] - wy;
             const wLen = Math.sqrt(dx * dx + dy * dy);
             const t = wLen > 0 ? (o.position || 0) / wLen : 0.5;
-            const posX = (wx + dx * t) / ppm;
-            const posY = (wy + dy * t) / ppm;
+            const posX = wx + dx * t;
+            const posY = wy + dy * t;
             const angle = Math.atan2(dy, dx) * 180 / Math.PI;
             return {
                 id: o.id,
                 position: { x: posX, y: posY },
-                width: (o.width || 90) / ppm,
+                width: o.width || 90,
                 angle: angle,
                 connects: [],
             };

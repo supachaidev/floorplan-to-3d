@@ -91,7 +91,7 @@ async def upload_floorplan(
 @app.post("/upload-vlm")
 async def upload_floorplan_vlm(
     file: UploadFile = File(...),
-    model: str = Query("Qwen/Qwen2.5-VL-7B-Instruct", description="VLM model name"),
+    model: str = Query("gemini-2.5-flash", description="Gemini model name"),
 ):
     """Accept a floor plan image and return wall-first JSON via Qwen2.5-VL."""
     if file.content_type and not file.content_type.startswith("image/"):
