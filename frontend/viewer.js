@@ -225,8 +225,8 @@
                 const a = pts[i];
                 const b = pts[(i + 1) % pts.length];
 
-                const ax = a.x - cx, az = -(a.y - cy);
-                const bx = b.x - cx, bz = -(b.y - cy);
+                const ax = a.x - cx, az = a.y - cy;
+                const bx = b.x - cx, bz = b.y - cy;
 
                 const edgeDx = bx - ax, edgeDz = bz - az;
                 const wallLen = Math.sqrt(edgeDx * edgeDx + edgeDz * edgeDz);
@@ -299,8 +299,8 @@
             // Room label
             const spriteMat = makeTextSprite(room.label);
             const labelCx = pts.reduce((s, p) => s + p.x, 0) / pts.length - cx;
-            const labelCy = -(pts.reduce((s, p) => s + p.y, 0) / pts.length - cy);
-            spriteMat.position.set(labelCx, height + 0.5, labelCy);
+            const labelCz = pts.reduce((s, p) => s + p.y, 0) / pts.length - cy;
+            spriteMat.position.set(labelCx, height + 0.5, labelCz);
             spriteMat.userData.isFloorplan = true;
             scene.add(spriteMat);
         });
@@ -313,7 +313,7 @@
 
             // Door hinge in world space (same transform as rooms)
             const hx = pos.x - cx;
-            const hz = -(pos.y - cy);
+            const hz = pos.y - cy;
 
             // Convert 2D image angle to 3D XZ-plane angle.
             // The detector angle is atan2 from hinge toward arc center in image
@@ -452,11 +452,14 @@
      * rooms reference wall IDs, and openings reference parent walls.
      */
     function renderVlmSchema(data) {
-        const ppm = data.scale?.pixels_per_meter || 50;
         const walls = data.walls || [];
         const rooms = data.rooms || [];
         const openings = data.openings || [];
         const wallHeight = 2.8; // meters
+
+        // VLM coordinates are normalized 0-1 fractions of the image.
+        // Scale to a reasonable meter size for the 3D scene.
+        const S = 15; // meters for the longest axis
 
         if (!walls.length) return;
 
@@ -474,10 +477,10 @@
         // Find centroid for centering (in meters)
         let cx = 0, cz = 0, count = 0;
         for (const wall of walls) {
-            cx += wall.start[0] / ppm;
-            cz += wall.start[1] / ppm;
-            cx += wall.end[0] / ppm;
-            cz += wall.end[1] / ppm;
+            cx += wall.start[0] * S;
+            cz += wall.start[1] * S;
+            cx += wall.end[0] * S;
+            cz += wall.end[1] * S;
             count += 2;
         }
         cx /= count;
@@ -498,11 +501,11 @@
 
         // Draw walls with openings cut out
         for (const wall of walls) {
-            const x1 = wall.start[0] / ppm - cx;
-            const z1 = -(wall.start[1] / ppm - cz);
-            const x2 = wall.end[0] / ppm - cx;
-            const z2 = -(wall.end[1] / ppm - cz);
-            const thickness = (wall.thickness || 20) / ppm;
+            const x1 = wall.start[0] * S - cx;
+            const z1 = wall.start[1] * S - cz;
+            const x2 = wall.end[0] * S - cx;
+            const z2 = wall.end[1] * S - cz;
+            const thickness = (wall.thickness || 0.02) * S;
 
             const edgeDx = x2 - x1, edgeDz = z2 - z1;
             const wallLen = Math.sqrt(edgeDx * edgeDx + edgeDz * edgeDz);
@@ -521,10 +524,12 @@
 
                 let prevT = 0;
                 for (const opening of wallOpenings) {
-                    const posM = opening.position / ppm;
-                    const widthM = (opening.width || 90) / ppm;
-                    const startT = Math.max(0, (posM - widthM / 2) / wallLen);
-                    const endT = Math.min(1, (posM + widthM / 2) / wallLen);
+                    // position is a 0-1 fraction along the wall; width is a fraction
+                    const posT = opening.position || 0.5;
+                    const halfW = (opening.width || 0.06) / 2;
+                    const startT = Math.max(0, posT - halfW);
+                    const endT = Math.min(1, posT + halfW);
+                    const widthM = (endT - startT) * wallLen;
 
                     const openingHeight = opening.type === "door" ? DOOR_HEIGHT : wallHeight * 0.6;
 
@@ -598,9 +603,11 @@
             if (!poly || poly.length < 3) continue;
 
             const shape = new THREE.Shape();
-            shape.moveTo(poly[0][0] / ppm - cx, -(poly[0][1] / ppm - cz));
+            // Shape Y maps to world -Z after rotation.x = -PI/2,
+            // so negate here so world Z = (y - cz), matching walls.
+            shape.moveTo(poly[0][0] * S - cx, -(poly[0][1] * S - cz));
             for (let i = 1; i < poly.length; i++) {
-                shape.lineTo(poly[i][0] / ppm - cx, -(poly[i][1] / ppm - cz));
+                shape.lineTo(poly[i][0] * S - cx, -(poly[i][1] * S - cz));
             }
 
             const geo = new THREE.ShapeGeometry(shape);
@@ -620,9 +627,9 @@
             // Room label
             if (room.label) {
                 let lx = 0, lz = 0;
-                for (const p of poly) { lx += p[0] / ppm; lz += p[1] / ppm; }
+                for (const p of poly) { lx += p[0] * S; lz += p[1] * S; }
                 lx = lx / poly.length - cx;
-                lz = -(lz / poly.length - cz);
+                lz = lz / poly.length - cz;
                 const sprite = makeTextSprite(room.label);
                 sprite.position.set(lx, wallHeight + 0.5, lz);
                 sprite.userData.isFloorplan = true;

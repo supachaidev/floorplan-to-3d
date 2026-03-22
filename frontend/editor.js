@@ -529,8 +529,7 @@
         const edited = JSON.parse(JSON.stringify(floorplanData));
 
         if (isVlmSchema) {
-            // Update VLM schema rooms with edited polygons
-            const ppm = edited.scale?.pixels_per_meter || 50;
+            // Update VLM schema rooms with edited polygons (normalized 0-1 coords)
             edited.rooms = rooms.map((r, i) => {
                 const orig = edited.rooms[i] || {};
                 return {
@@ -538,8 +537,8 @@
                     id: r.id,
                     label: r.label,
                     floor_polygon: r.polygon.map(p => [
-                        Math.round(p.x * ppm * 100) / 100,
-                        Math.round(p.y * ppm * 100) / 100,
+                        Math.round(p.x * 10000) / 10000,
+                        Math.round(p.y * 10000) / 10000,
                     ]),
                 };
             });
