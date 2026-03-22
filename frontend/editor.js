@@ -3,8 +3,9 @@
  *
  * Interactions:
  *   Room corners:  drag to move | double-click edge to add point | right-click corner to delete
- *   Door hinge:    drag to move position
+ *   Door hinge:    drag to move position | right-click to delete door
  *   Door rotation: drag diamond handle or scroll wheel over door area
+ *   Add Door:      click toolbar button, then click canvas to place
  */
 (function () {
     const canvas = document.getElementById("canvas-2d");
@@ -17,6 +18,7 @@
     let dragState = null;
     let hoveredPoint = null;   // { roomIdx, ptIdx } | { doorIdx, rotate? }
     let hoveredEdge = null;    // { roomIdx, edgeIdx, t, sx, sy } - for add-point preview
+    let addDoorMode = false;
     const HANDLE_RADIUS = 6;
     const ROTATE_HANDLE_RADIUS = 7;
     const EDGE_HIT_DIST = 10;
@@ -349,6 +351,14 @@
         });
 
         drawDoors();
+
+        if (addDoorMode) {
+            ctx.fillStyle = "rgba(255,107,107,0.85)";
+            ctx.font = "bold 13px -apple-system, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            ctx.fillText("Click to place door  (Esc to cancel)", canvas.width / 2, 14);
+        }
     }
 
     function drawDoors() {
@@ -414,6 +424,23 @@
         if (e.button !== 0) return; // left click only
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+        if (addDoorMode) {
+            const pt = fromScreen(mx, my);
+            const nextId = "d" + (doors.length + 1);
+            doors.push({
+                id: nextId,
+                position: { x: Math.round(pt.x * 10000) / 10000, y: Math.round(pt.y * 10000) / 10000 },
+                width: isVlmSchema ? 0.04 : 0.9,
+                angle: 0,
+                connects: [],
+            });
+            addDoorMode = false;
+            canvas.style.cursor = "default";
+            draw();
+            return;
+        }
+
         const handle = findHandle(mx, my);
         if (handle) {
             dragState = handle;
@@ -448,7 +475,8 @@
             // Only look for edge hover when not over a handle
             hoveredEdge = handle ? null : findEdge(mx, my);
 
-            if (handle && handle.rotate) canvas.style.cursor = "crosshair";
+            if (addDoorMode) canvas.style.cursor = "crosshair";
+            else if (handle && handle.rotate) canvas.style.cursor = "crosshair";
             else if (handle) canvas.style.cursor = "grab";
             else if (hoveredEdge) canvas.style.cursor = "copy";
             else canvas.style.cursor = "default";
@@ -491,11 +519,17 @@
     });
 
     // Right-click on corner → delete point (min 3 vertices)
+    // Right-click on door hinge → delete door
     canvas.addEventListener("contextmenu", (e) => {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
         const handle = findHandle(mx, my);
-        if (handle && handle.roomIdx !== undefined && handle.ptIdx !== undefined) {
+        if (handle && handle.doorIdx !== undefined && !handle.rotate) {
+            e.preventDefault();
+            doors.splice(handle.doorIdx, 1);
+            hoveredPoint = null;
+            draw();
+        } else if (handle && handle.roomIdx !== undefined && handle.ptIdx !== undefined) {
             const poly = rooms[handle.roomIdx].polygon;
             if (poly.length > 3) {
                 e.preventDefault();
@@ -517,6 +551,14 @@
             draw();
         }
     }, { passive: false });
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && addDoorMode) {
+            addDoorMode = false;
+            canvas.style.cursor = "default";
+            draw();
+        }
+    });
 
     window.addEventListener("resize", resizeCanvas);
 
@@ -542,6 +584,13 @@
                     ]),
                 };
             });
+            // Export editor doors so the viewer can render them
+            edited._editorDoors = doors.map(d => ({
+                id: d.id,
+                position: { x: d.position.x, y: d.position.y },
+                width: d.width,
+                angle: d.angle,
+            }));
         } else {
             edited.floorplan.rooms = rooms.map(r => ({
                 id: r.id, label: r.label, height: r.height, type: r.type,
@@ -560,5 +609,11 @@
         if (data) window.viewer.render(data);
     }
 
-    window.editor = { loadImage, resetPolygons, confirmAndRender3D, getFloorplanData };
+    function startAddDoor() {
+        addDoorMode = true;
+        canvas.style.cursor = "crosshair";
+        draw();
+    }
+
+    window.editor = { loadImage, resetPolygons, confirmAndRender3D, getFloorplanData, startAddDoor };
 })();

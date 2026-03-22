@@ -637,6 +637,36 @@
             }
         }
 
+        // Render user-placed standalone doors
+        const editorDoors = data._editorDoors || [];
+        for (const door of editorDoors) {
+            const hx = door.position.x * S - cx;
+            const hz = door.position.y * S - cz;
+            const doorWidth = (door.width || 0.04) * S;
+            const angleRad = (door.angle || 0) * Math.PI / 180;
+
+            const doorMat = new THREE.MeshPhongMaterial({
+                color: 0xDEB887, opacity: 0.85, transparent: true, side: THREE.DoubleSide,
+            });
+            const panelGeo = new THREE.BoxGeometry(doorWidth, DOOR_HEIGHT, 0.05);
+            panelGeo.translate(doorWidth / 2, 0, 0);
+            const panel = new THREE.Mesh(panelGeo, doorMat);
+            panel.position.set(hx, DOOR_HEIGHT / 2, hz);
+            panel.rotation.y = -angleRad;
+            panel.userData.isFloorplan = true;
+            scene.add(panel);
+
+            // Door frame posts
+            const frameMat = new THREE.MeshPhongMaterial({
+                color: 0x8B4513, opacity: 0.9, transparent: true,
+            });
+            const postGeo = new THREE.BoxGeometry(0.08, DOOR_HEIGHT + 0.1, 0.15);
+            const postHinge = new THREE.Mesh(postGeo, frameMat);
+            postHinge.position.set(hx, DOOR_HEIGHT / 2, hz);
+            postHinge.userData.isFloorplan = true;
+            scene.add(postHinge);
+        }
+
         // Fit camera
         const bbox = new THREE.Box3();
         scene.traverse((obj) => {
