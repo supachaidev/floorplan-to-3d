@@ -26,11 +26,16 @@ def _remove_small_components(binary: np.ndarray, max_frac: float = 0.003) -> np.
 _MAX_DETECT_DIM = 1200  # downscale large images for speed
 
 
-def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
+def detect_rooms_cv(image: np.ndarray, classify: bool = True) -> list[dict] | None:
     """Detect rooms using OpenCV for clean printed plans.
 
     Uses flood-fill to find enclosed white regions (rooms) between walls.
     Sweeps multiple threshold parameters and picks the best result.
+
+    Args:
+        image: BGR image.
+        classify: If True, assign room types/labels by geometry heuristics.
+            Set False when using VLM for labeling (preserves _area_frac).
 
     Returns a list of room dicts or None if detection fails.
     """
@@ -78,7 +83,8 @@ def detect_rooms_cv(image: np.ndarray) -> list[dict] | None:
     # Merge rooms that overlap significantly (IoU > 0.5)
     best_rooms = _merge_overlapping_rooms(best_rooms)
 
-    _classify_rooms_by_geometry(best_rooms)
+    if classify:
+        _classify_rooms_by_geometry(best_rooms)
     return best_rooms
 
 

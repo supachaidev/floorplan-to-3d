@@ -93,7 +93,12 @@ async def upload_floorplan_vlm(
     file: UploadFile = File(...),
     model: str = Query("gemini-2.5-flash", description="Gemini model name"),
 ):
-    """Accept a floor plan image and return wall-first JSON via Qwen2.5-VL."""
+    """Hybrid pipeline: OpenCV geometry + Gemini room labeling.
+
+    Uses OpenCV for accurate room/door detection, then Gemini to
+    label each room with a descriptive name based on the image.
+    Returns the same schema as /upload (floorplan wrapper).
+    """
     if file.content_type and not file.content_type.startswith("image/"):
         return JSONResponse(
             status_code=400,
@@ -117,25 +122,37 @@ async def upload_floorplan_vlm(
         )
 
     try:
-        from pipeline.vlm_vectorize import vectorize_floorplan_from_array
-        from pipeline.detect import detect_doors_cv
+        from pipeline.vlm_vectorize import label_rooms_with_vlm
+        from pipeline.detect import detect_rooms_cv, detect_doors_cv
 
-        # Convert BGR (OpenCV) to RGB (PIL)
-        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        result = vectorize_floorplan_from_array(image_rgb, model_name=model)
+        # Step 1: OpenCV detection (same as /upload pipeline)
+        processed = deskew(image)
+        ph, pw = processed.shape[:2]
 
-        if result is None:
+        cv_rooms = detect_rooms_cv(processed, classify=False)
+        cv_doors = detect_doors_cv(processed)
+
+        if not cv_rooms:
             return JSONResponse(
                 status_code=500,
-                content={"error": "VLM failed to produce valid JSON. Try a cleaner image."},
+                content={"error": "Could not detect rooms. Try a cleaner image."},
             )
 
-        # Hybrid: replace VLM doors with CV-detected doors (more accurate positions)
-        cv_doors = detect_doors_cv(image)
-        if cv_doors:
-            from pipeline.vlm_vectorize import merge_cv_doors
-            result = merge_cv_doors(result, cv_doors)
+        # Step 2: Gemini labels the rooms using the image
+        image_rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+        labeled_rooms = label_rooms_with_vlm(image_rgb, cv_rooms, model_name=model)
 
+        # Step 3: Simplify polygons and convert to meters (same as /upload)
+        for room in labeled_rooms:
+            room["polygon"] = simplify_polygon(room["polygon"])
+
+        scale = compute_scale(pw, ph)
+        rooms_m = normalize_to_meters(labeled_rooms, pw, ph, scale_m_per_px=scale)
+        doors_m = normalize_doors_to_meters(cv_doors or [], pw, ph, scale_m_per_px=scale)
+
+        image_width_m = pw * scale
+        image_height_m = ph * scale
+        result = build_floorplan_json(rooms_m, doors_m, image_width_m, image_height_m)
         return result
 
     except RuntimeError as e:
