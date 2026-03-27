@@ -6,6 +6,7 @@
  *   Door hinge:    drag to move position | right-click to delete door
  *   Door rotation: drag diamond handle or scroll wheel over door area
  *   Add Door:      click toolbar button, then click canvas to place
+ *   Room body:     double-click to rename | right-click to delete room
  *   Add Room:      click toolbar button, click points to define polygon, click first point or Enter to close
  *   Merge Rooms:   click toolbar button, click two rooms to merge into one (convex hull)
  *   Wall endpoints: drag to move | right-click to delete wall
@@ -859,7 +860,7 @@
         draw();
     });
 
-    // Double-click on edge → add point
+    // Double-click on edge → add point | double-click inside room → rename
     canvas.addEventListener("dblclick", (e) => {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
@@ -880,11 +881,35 @@
             poly.splice(edge.edgeIdx + 1, 0, newPt);
             hoveredEdge = null;
             draw();
+            return;
+        }
+
+        // Double-click inside room body → rename
+        const rIdx = findRoomUnderMouse(mx, my);
+        if (rIdx >= 0) {
+            const room = rooms[rIdx];
+            const newName = prompt("Rename room:", room.label);
+            if (newName !== null && newName.trim() !== "") {
+                room.label = newName.trim();
+                // Update type based on new name
+                const typeLower = room.label.toLowerCase();
+                if (typeLower.includes("bed")) room.type = "bedroom";
+                else if (typeLower.includes("bath") || typeLower.includes("toilet")) room.type = "bathroom";
+                else if (typeLower.includes("kitchen")) room.type = "kitchen";
+                else if (typeLower.includes("living")) room.type = "living";
+                else if (typeLower.includes("dining")) room.type = "dining";
+                else if (typeLower.includes("hall") || typeLower.includes("corridor")) room.type = "hallway";
+                else if (typeLower.includes("closet") || typeLower.includes("storage")) room.type = "closet";
+                else if (typeLower.includes("balcon")) room.type = "balcony";
+                else room.type = "other";
+                draw();
+            }
         }
     });
 
     // Right-click on corner → delete point (min 3 vertices)
     // Right-click on door hinge → delete door
+    // Right-click inside room (not on handle) → delete room
     canvas.addEventListener("contextmenu", (e) => {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
@@ -906,6 +931,17 @@
                 poly.splice(handle.ptIdx, 1);
                 hoveredPoint = null;
                 draw();
+            }
+        } else {
+            // No handle hit — check if right-clicking inside a room body
+            const rIdx = findRoomUnderMouse(mx, my);
+            if (rIdx >= 0) {
+                e.preventDefault();
+                const room = rooms[rIdx];
+                if (confirm(`Delete "${room.label}"?`)) {
+                    rooms.splice(rIdx, 1);
+                    draw();
+                }
             }
         }
     });
