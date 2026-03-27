@@ -118,6 +118,7 @@ async def upload_floorplan_vlm(
 
     try:
         from pipeline.vlm_vectorize import vectorize_floorplan_from_array
+        from pipeline.detect import detect_doors_cv
 
         # Convert BGR (OpenCV) to RGB (PIL)
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -128,6 +129,12 @@ async def upload_floorplan_vlm(
                 status_code=500,
                 content={"error": "VLM failed to produce valid JSON. Try a cleaner image."},
             )
+
+        # Hybrid: replace VLM doors with CV-detected doors (more accurate positions)
+        cv_doors = detect_doors_cv(image)
+        if cv_doors:
+            from pipeline.vlm_vectorize import merge_cv_doors
+            result = merge_cv_doors(result, cv_doors)
 
         return result
 
