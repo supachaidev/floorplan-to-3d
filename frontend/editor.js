@@ -6,6 +6,9 @@
  *   Door hinge:    drag to move position | right-click to delete door
  *   Door rotation: drag diamond handle or scroll wheel over door area
  *   Add Door:      click toolbar button, then click canvas to place
+ *   Add Room:      click toolbar button, click points to define polygon, click first point or Enter to close
+ *   Merge Rooms:   click toolbar button, click two rooms to merge into one (convex hull)
+ *   Wall endpoints: drag to move | right-click to delete wall
  */
 (function () {
     const canvas = document.getElementById("canvas-2d");
@@ -15,10 +18,17 @@
     let floorplanData = null;
     let rooms = [];
     let doors = [];
+    let walls = [];            // { id, start: {x,y}, end: {x,y}, thickness }
     let dragState = null;
-    let hoveredPoint = null;   // { roomIdx, ptIdx } | { doorIdx, rotate? }
+    let hoveredPoint = null;   // { roomIdx, ptIdx } | { doorIdx, rotate? } | { wallIdx, endpoint }
     let hoveredEdge = null;    // { roomIdx, edgeIdx, t, sx, sy } - for add-point preview
     let addDoorMode = false;
+    let addWallMode = false;       // false | "drawing" (actively placing vertices)
+    let addWallPoints = [];        // array of {x, y} in data coords — vertices being placed
+    let addWallMousePos = null;    // current mouse position in screen coords for preview line
+    let mergeRoomMode = false;     // false | { first: roomIdx } (waiting for second room click)
+    let mergeHighlight = -1;       // roomIdx under mouse during merge mode
+
     const HANDLE_RADIUS = 6;
     const ROTATE_HANDLE_RADIUS = 7;
     const EDGE_HIT_DIST = 10;
@@ -173,6 +183,14 @@
             };
         }).filter(Boolean);
 
+        // Load VLM walls into editor
+        walls = (floorplanData.walls || []).map(w => ({
+            id: w.id,
+            start: { x: w.start[0], y: w.start[1] },
+            end: { x: w.end[0], y: w.end[1] },
+            thickness: w.thickness || 0.02,
+        }));
+
         rooms._boundsX = boundsX || 1;
         rooms._boundsY = boundsY || 1;
     }
@@ -210,6 +228,7 @@
         doors = (fp.doors || []).map(d => ({
             ...d, position: { x: d.position.x, y: d.position.y },
         }));
+        walls = []; // OpenCV schema derives walls from room polygons
         rooms._boundsX = boundsX || 1;
         rooms._boundsY = boundsY || 1;
     }
@@ -252,6 +271,15 @@
             if (Math.hypot(mx - rh.x, my - rh.y) < ROTATE_HANDLE_RADIUS + 5)
                 return { doorIdx: d, rotate: true };
         }
+        // Wall endpoint handles
+        for (let w = 0; w < walls.length; w++) {
+            const ss = toScreen(walls[w].start);
+            if (Math.hypot(mx - ss.x, my - ss.y) < HANDLE_RADIUS + 4)
+                return { wallIdx: w, endpoint: "start" };
+            const se = toScreen(walls[w].end);
+            if (Math.hypot(mx - se.x, my - se.y) < HANDLE_RADIUS + 4)
+                return { wallIdx: w, endpoint: "end" };
+        }
         // Room polygon corners
         for (let r = 0; r < rooms.length; r++) {
             for (let p = 0; p < rooms[r].polygon.length; p++) {
@@ -276,6 +304,102 @@
             if (Math.hypot(mx - sp.x, my - sp.y) < (doors[d].width || 0.9) * s + 10) return d;
         }
         return -1;
+    }
+
+    // ── polygon / merge helpers ────────────────────────────────────
+
+    /** Snap a data-coordinate point to nearby existing room corners or in-progress points. */
+    function snapToNearby(mx, my, dataPt) {
+        const SNAP_DIST = 10; // screen pixels
+        // Check existing room polygon corners
+        for (const room of rooms) {
+            for (const p of room.polygon) {
+                const sp = toScreen(p);
+                if (Math.hypot(mx - sp.x, my - sp.y) < SNAP_DIST)
+                    return { x: p.x, y: p.y };
+            }
+        }
+        // Check already-placed points in current polygon
+        for (const p of addWallPoints) {
+            const sp = toScreen(p);
+            if (Math.hypot(mx - sp.x, my - sp.y) < SNAP_DIST)
+                return { x: p.x, y: p.y };
+        }
+        return dataPt;
+    }
+
+    /** Close the polygon being drawn and create a new room from it. */
+    function finishAddWallPolygon() {
+        if (addWallPoints.length < 3) { addWallPoints = []; addWallMode = false; return; }
+        const nextId = "room_user_" + (rooms.length + 1);
+        rooms.push({
+            id: nextId,
+            label: "Room " + (rooms.length + 1),
+            type: "other",
+            height: 3.0,
+            polygon: addWallPoints.map(p => ({ x: p.x, y: p.y })),
+        });
+        addWallPoints = [];
+        addWallMode = false;
+        canvas.style.cursor = "default";
+    }
+
+    /** Find which room polygon contains the screen point (mx, my). */
+    function findRoomUnderMouse(mx, my) {
+        for (let r = rooms.length - 1; r >= 0; r--) {
+            const poly = rooms[r].polygon;
+            if (poly.length < 3) continue;
+            if (pointInPolygon(mx, my, poly.map(p => toScreen(p)))) return r;
+        }
+        return -1;
+    }
+
+    /** Point-in-polygon test (screen coords). */
+    function pointInPolygon(px, py, screenPoly) {
+        let inside = false;
+        for (let i = 0, j = screenPoly.length - 1; i < screenPoly.length; j = i++) {
+            const xi = screenPoly[i].x, yi = screenPoly[i].y;
+            const xj = screenPoly[j].x, yj = screenPoly[j].y;
+            if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+                inside = !inside;
+        }
+        return inside;
+    }
+
+    /** Merge two rooms by combining their polygons using convex hull. */
+    function mergeRooms(idxA, idxB) {
+        const a = rooms[idxA], b = rooms[idxB];
+        const allPts = [...a.polygon, ...b.polygon];
+        const hull = convexHull(allPts);
+
+        // Keep the first room's metadata, update polygon
+        a.polygon = hull;
+        a.label = a.label + " + " + b.label;
+        // Remove the second room
+        const removeIdx = Math.max(idxA, idxB);
+        const keepIdx = Math.min(idxA, idxB);
+        rooms.splice(removeIdx, 1);
+        // If we removed before the kept index, adjust
+        // (not needed since we always splice the higher index)
+    }
+
+    /** Compute convex hull of a set of {x, y} points (Andrew's monotone chain). */
+    function convexHull(points) {
+        const pts = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+        if (pts.length <= 2) return pts;
+        const cross = (O, A, B) => (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x);
+        const lower = [];
+        for (const p of pts) {
+            while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+            lower.push(p);
+        }
+        const upper = [];
+        for (let i = pts.length - 1; i >= 0; i--) {
+            while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pts[i]) <= 0) upper.pop();
+            upper.push(pts[i]);
+        }
+        upper.pop(); lower.pop();
+        return lower.concat(upper);
     }
 
     // ── drawing ─────────────────────────────────────────────────────
@@ -351,6 +475,115 @@
         });
 
         drawDoors();
+        drawWalls();
+
+        if (addWallMode) {
+            // Draw in-progress polygon
+            if (addWallPoints.length > 0) {
+                ctx.beginPath();
+                const first = toScreen(addWallPoints[0]);
+                ctx.moveTo(first.x, first.y);
+                for (let i = 1; i < addWallPoints.length; i++) {
+                    const p = toScreen(addWallPoints[i]);
+                    ctx.lineTo(p.x, p.y);
+                }
+                // Preview line to mouse
+                if (addWallMousePos) {
+                    ctx.lineTo(addWallMousePos.x, addWallMousePos.y);
+                }
+                ctx.strokeStyle = "rgba(255,200,50,0.8)";
+                ctx.lineWidth = 2;
+                ctx.setLineDash([6, 4]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Fill preview if 3+ points
+                if (addWallPoints.length >= 3) {
+                    ctx.beginPath();
+                    ctx.moveTo(first.x, first.y);
+                    for (let i = 1; i < addWallPoints.length; i++) {
+                        const p = toScreen(addWallPoints[i]);
+                        ctx.lineTo(p.x, p.y);
+                    }
+                    ctx.closePath();
+                    ctx.fillStyle = "rgba(255,200,50,0.1)";
+                    ctx.fill();
+                }
+
+                // Draw vertex handles
+                addWallPoints.forEach((pt, i) => {
+                    const sp = toScreen(pt);
+                    ctx.beginPath();
+                    ctx.arc(sp.x, sp.y, HANDLE_RADIUS, 0, Math.PI * 2);
+                    ctx.fillStyle = i === 0 ? "#FF6B6B" : "#FFC832";
+                    ctx.fill();
+                    ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+                });
+
+                // Close hint on first point
+                if (addWallPoints.length >= 3 && addWallMousePos) {
+                    const d = Math.hypot(addWallMousePos.x - first.x, addWallMousePos.y - first.y);
+                    if (d < 20) {
+                        ctx.beginPath();
+                        ctx.arc(first.x, first.y, 12, 0, Math.PI * 2);
+                        ctx.strokeStyle = "rgba(255,107,107,0.8)";
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    }
+                }
+            }
+
+            ctx.fillStyle = "rgba(255,200,50,0.85)";
+            ctx.font = "bold 13px -apple-system, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            const n = addWallPoints.length;
+            let msg;
+            if (n === 0) msg = "Click to place first vertex  (Esc to cancel)";
+            else if (n < 3) msg = `${n} point${n > 1 ? "s" : ""} placed — keep clicking to add more  (Esc to cancel)`;
+            else msg = `${n} points — click first point (red) or press Enter to close  (Esc to cancel)`;
+            ctx.fillText(msg, canvas.width / 2, 14);
+        }
+
+        if (mergeRoomMode) {
+            // Highlight room under mouse
+            if (mergeHighlight >= 0 && mergeHighlight < rooms.length) {
+                const room = rooms[mergeHighlight];
+                ctx.beginPath();
+                const f = toScreen(room.polygon[0]);
+                ctx.moveTo(f.x, f.y);
+                for (let i = 1; i < room.polygon.length; i++) { const p = toScreen(room.polygon[i]); ctx.lineTo(p.x, p.y); }
+                ctx.closePath();
+                ctx.strokeStyle = "#FFD700";
+                ctx.lineWidth = 3;
+                ctx.setLineDash([6, 3]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+            // Highlight already-selected first room
+            if (mergeRoomMode.first !== undefined && mergeRoomMode.first < rooms.length) {
+                const room = rooms[mergeRoomMode.first];
+                ctx.beginPath();
+                const f = toScreen(room.polygon[0]);
+                ctx.moveTo(f.x, f.y);
+                for (let i = 1; i < room.polygon.length; i++) { const p = toScreen(room.polygon[i]); ctx.lineTo(p.x, p.y); }
+                ctx.closePath();
+                ctx.fillStyle = "rgba(255,215,0,0.2)";
+                ctx.fill();
+                ctx.strokeStyle = "#FFD700";
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = "rgba(255,215,0,0.85)";
+            ctx.font = "bold 13px -apple-system, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "top";
+            const msg = mergeRoomMode.first !== undefined
+                ? "Now click the second room to merge  (Esc to cancel)"
+                : "Click the first room to merge  (Esc to cancel)";
+            ctx.fillText(msg, canvas.width / 2, 14);
+        }
 
         if (addDoorMode) {
             ctx.fillStyle = "rgba(255,107,107,0.85)";
@@ -418,12 +651,124 @@
         });
     }
 
+    /** Compute the 4 screen-space corners of a wall rectangle. */
+    function wallRectCorners(wall) {
+        const s = toScreen(wall.start);
+        const e = toScreen(wall.end);
+        const dx = e.x - s.x, dy = e.y - s.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 0.1) return null;
+        // Perpendicular offset in screen pixels from thickness
+        const scale = getScale();
+        const halfT = (wall.thickness || 0.02) * scale / 2;
+        const nx = (-dy / len) * halfT;
+        const ny = (dx / len) * halfT;
+        return [
+            { x: s.x + nx, y: s.y + ny },
+            { x: e.x + nx, y: e.y + ny },
+            { x: e.x - nx, y: e.y - ny },
+            { x: s.x - nx, y: s.y - ny },
+        ];
+    }
+
+    function drawWalls() {
+        walls.forEach((wall, wIdx) => {
+            const corners = wallRectCorners(wall);
+            if (!corners) return;
+
+            // Filled rectangle
+            ctx.beginPath();
+            ctx.moveTo(corners[0].x, corners[0].y);
+            for (let i = 1; i < 4; i++) ctx.lineTo(corners[i].x, corners[i].y);
+            ctx.closePath();
+            ctx.fillStyle = "rgba(255,200,50,0.25)";
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255,200,50,0.7)";
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+
+            // Center line (dashed)
+            const s = toScreen(wall.start);
+            const e = toScreen(wall.end);
+            ctx.beginPath();
+            ctx.moveTo(s.x, s.y);
+            ctx.lineTo(e.x, e.y);
+            ctx.strokeStyle = "rgba(255,200,50,0.4)";
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 3]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Start endpoint handle
+            const hS = hoveredPoint && hoveredPoint.wallIdx === wIdx && hoveredPoint.endpoint === "start";
+            ctx.beginPath();
+            ctx.arc(s.x, s.y, hS ? HANDLE_RADIUS + 2 : HANDLE_RADIUS, 0, Math.PI * 2);
+            ctx.fillStyle = hS ? "#fff" : "#FFC832";
+            ctx.fill();
+            ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+
+            // End endpoint handle
+            const hE = hoveredPoint && hoveredPoint.wallIdx === wIdx && hoveredPoint.endpoint === "end";
+            ctx.beginPath();
+            ctx.arc(e.x, e.y, hE ? HANDLE_RADIUS + 2 : HANDLE_RADIUS, 0, Math.PI * 2);
+            ctx.fillStyle = hE ? "#fff" : "#FFC832";
+            ctx.fill();
+            ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+
+            // Wall label at midpoint
+            const mx = (s.x + e.x) / 2, my = (s.y + e.y) / 2;
+            ctx.fillStyle = "rgba(255,200,50,0.8)";
+            ctx.font = "9px -apple-system, sans-serif";
+            ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+            ctx.fillText(wall.id, mx, my - 4);
+        });
+
+    }
+
     // ── event handlers ──────────────────────────────────────────────
 
     canvas.addEventListener("mousedown", (e) => {
         if (e.button !== 0) return; // left click only
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+        if (addWallMode) {
+            const pt = fromScreen(mx, my);
+            const snap = { x: Math.round(pt.x * 10000) / 10000, y: Math.round(pt.y * 10000) / 10000 };
+
+            // Snap to existing room corners or other placed points
+            const snapped = snapToNearby(mx, my, snap);
+
+            // If we have 3+ points and click near the first point, close the polygon
+            if (addWallPoints.length >= 3) {
+                const firstScreen = toScreen(addWallPoints[0]);
+                if (Math.hypot(mx - firstScreen.x, my - firstScreen.y) < 12) {
+                    finishAddWallPolygon();
+                    draw();
+                    return;
+                }
+            }
+
+            addWallPoints.push(snapped);
+            draw();
+            return;
+        }
+
+        if (mergeRoomMode) {
+            const rIdx = findRoomUnderMouse(mx, my);
+            if (rIdx < 0) { draw(); return; }
+
+            if (!mergeRoomMode.first && mergeRoomMode.first !== 0) {
+                mergeRoomMode = { first: rIdx };
+            } else if (rIdx !== mergeRoomMode.first) {
+                mergeRooms(mergeRoomMode.first, rIdx);
+                mergeRoomMode = false;
+                mergeHighlight = -1;
+                canvas.style.cursor = "default";
+            }
+            draw();
+            return;
+        }
 
         if (addDoorMode) {
             const pt = fromScreen(mx, my);
@@ -452,12 +797,32 @@
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
+        if (addWallMode) {
+            addWallMousePos = { x: mx, y: my };
+            canvas.style.cursor = "crosshair";
+            draw();
+            return;
+        }
+
+        if (mergeRoomMode) {
+            mergeHighlight = findRoomUnderMouse(mx, my);
+            canvas.style.cursor = mergeHighlight >= 0 ? "pointer" : "crosshair";
+            draw();
+            return;
+        }
+
         if (dragState) {
             if (dragState.rotate) {
                 const door = doors[dragState.doorIdx];
                 const sp = toScreen(door.position);
                 const a = Math.atan2(my - sp.y, mx - sp.x);
                 door.angle = Math.round(((a * 180 / Math.PI) % 360 + 360) % 360);
+            } else if (dragState.wallIdx !== undefined) {
+                const pt = fromScreen(mx, my);
+                const w = walls[dragState.wallIdx];
+                const ep = w[dragState.endpoint];
+                ep.x = Math.round(pt.x * 10000) / 10000;
+                ep.y = Math.round(pt.y * 10000) / 10000;
             } else if (dragState.doorIdx !== undefined) {
                 const pt = fromScreen(mx, my);
                 doors[dragState.doorIdx].position.x = Math.round(pt.x * 100) / 100;
@@ -524,7 +889,12 @@
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
         const handle = findHandle(mx, my);
-        if (handle && handle.doorIdx !== undefined && !handle.rotate) {
+        if (handle && handle.wallIdx !== undefined) {
+            e.preventDefault();
+            walls.splice(handle.wallIdx, 1);
+            hoveredPoint = null;
+            draw();
+        } else if (handle && handle.doorIdx !== undefined && !handle.rotate) {
             e.preventDefault();
             doors.splice(handle.doorIdx, 1);
             hoveredPoint = null;
@@ -540,10 +910,36 @@
         }
     });
 
-    // Scroll wheel → rotate doors
+    /** Find wall index whose center line is near screen point (mx, my). */
+    function findWallUnderMouse(mx, my) {
+        for (let w = 0; w < walls.length; w++) {
+            const s = toScreen(walls[w].start);
+            const e = toScreen(walls[w].end);
+            const { dist } = pointToSegment(mx, my, s.x, s.y, e.x, e.y);
+            const scale = getScale();
+            const halfT = (walls[w].thickness || 0.02) * scale / 2;
+            if (dist < halfT + 8) return w;
+        }
+        return -1;
+    }
+
+    // Scroll wheel → rotate doors / adjust wall thickness
     canvas.addEventListener("wheel", (e) => {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+
+        // Check wall first (thickness adjust)
+        const wIdx = findWallUnderMouse(mx, my);
+        if (wIdx >= 0) {
+            e.preventDefault();
+            const step = isVlmSchema ? 0.003 : 0.05;
+            const min = isVlmSchema ? 0.005 : 0.05;
+            walls[wIdx].thickness = Math.max(min, (walls[wIdx].thickness || 0.02) + (e.deltaY > 0 ? step : -step));
+            walls[wIdx].thickness = Math.round(walls[wIdx].thickness * 1000) / 1000;
+            draw();
+            return;
+        }
+
         const dIdx = findDoorUnderMouse(mx, my);
         if (dIdx >= 0) {
             e.preventDefault();
@@ -553,9 +949,15 @@
     }, { passive: false });
 
     document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && addDoorMode) {
-            addDoorMode = false;
+        if (e.key === "Escape") {
+            if (addDoorMode) { addDoorMode = false; }
+            if (addWallMode) { addWallMode = false; addWallPoints = []; addWallMousePos = null; }
+            if (mergeRoomMode) { mergeRoomMode = false; mergeHighlight = -1; }
             canvas.style.cursor = "default";
+            draw();
+        }
+        if (e.key === "Enter" && addWallMode && addWallPoints.length >= 3) {
+            finishAddWallPolygon();
             draw();
         }
     });
@@ -571,6 +973,13 @@
         const edited = JSON.parse(JSON.stringify(floorplanData));
 
         if (isVlmSchema) {
+            // Update VLM schema walls with edited positions
+            edited.walls = walls.map(w => ({
+                id: w.id,
+                start: [w.start.x, w.start.y],
+                end: [w.end.x, w.end.y],
+                thickness: w.thickness || 0.02,
+            }));
             // Update VLM schema rooms with edited polygons (normalized 0-1 coords)
             edited.rooms = rooms.map((r, i) => {
                 const orig = edited.rooms[i] || {};
@@ -610,10 +1019,37 @@
     }
 
     function startAddDoor() {
+        addWallMode = false;
+        addWallPoints = [];
+        addWallMousePos = null;
+        mergeRoomMode = false;
+        mergeHighlight = -1;
         addDoorMode = true;
         canvas.style.cursor = "crosshair";
         draw();
     }
 
-    window.editor = { loadImage, resetPolygons, confirmAndRender3D, getFloorplanData, startAddDoor };
+    function startAddWall() {
+        addDoorMode = false;
+        mergeRoomMode = false;
+        mergeHighlight = -1;
+        addWallMode = "drawing";
+        addWallPoints = [];
+        addWallMousePos = null;
+        canvas.style.cursor = "crosshair";
+        draw();
+    }
+
+    function startMergeRooms() {
+        addDoorMode = false;
+        addWallMode = false;
+        addWallPoints = [];
+        addWallMousePos = null;
+        mergeRoomMode = {};
+        mergeHighlight = -1;
+        canvas.style.cursor = "crosshair";
+        draw();
+    }
+
+    window.editor = { loadImage, resetPolygons, confirmAndRender3D, getFloorplanData, startAddDoor, startAddWall, startMergeRooms };
 })();
