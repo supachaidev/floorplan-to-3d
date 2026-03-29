@@ -49,6 +49,7 @@ import numpy as np
 from pipeline.preprocess import deskew
 from pipeline.detect import detect_rooms
 from pipeline.polygons import simplify_polygon
+from pipeline.profiler import profile_image
 
 
 def polygon_to_mask(polygon: list[dict], size: int = 500) -> np.ndarray:
@@ -157,6 +158,9 @@ def evaluate_image(
     if image is None:
         return {"error": f"Could not read image: {image_path}"}
 
+    # Profile image BEFORE deskew (raw input)
+    image_profile = profile_image(image)
+
     with open(gt_path) as f:
         gt = json.load(f)
 
@@ -218,6 +222,7 @@ def evaluate_image(
 
     return {
         "image": image_path.name,
+        "image_profile": image_profile,
         "rooms": {
             "gt_count": len(gt_rooms),
             "pred_count": len(pred_rooms),
@@ -301,6 +306,38 @@ def print_report(results: list[dict]) -> None:
         print(f"  Avg Room IoU: {sum(all_room_iou) / len(all_room_iou):.1%}")
         print(f"  Avg Door F1:  {sum(all_door_f1) / len(all_door_f1):.1%}")
         print("=" * 60)
+
+    # --- Category breakdown table ---
+    categories = {}
+    for r in results:
+        if "error" in r:
+            continue
+        profile = r.get("image_profile", {})
+        cat = profile.get("category", "unknown")
+        if cat not in categories:
+            categories[cat] = {"room_f1": [], "door_f1": [], "iou": []}
+        categories[cat]["room_f1"].append(r["rooms"]["f1"])
+        categories[cat]["door_f1"].append(r["doors"]["f1"])
+        categories[cat]["iou"].append(r["rooms"]["mean_iou"])
+
+    if categories:
+        print("\n" + "=" * 72)
+        print("CATEGORY BREAKDOWN")
+        print("-" * 72)
+        print(f"{'Category':<17}| {'Count':>5} | {'Avg Room F1':>11} | "
+              f"{'Avg Door F1':>11} | {'Avg IoU':>11}")
+        print("-" * 72)
+        for cat in ["clean_digital", "low_contrast", "hand_drawn", "photo"]:
+            if cat not in categories:
+                continue
+            data = categories[cat]
+            count = len(data["room_f1"])
+            avg_rf1 = sum(data["room_f1"]) / count
+            avg_df1 = sum(data["door_f1"]) / count
+            avg_iou = sum(data["iou"]) / count
+            print(f"{cat:<17}| {count:>5} | {avg_rf1:>10.1%} | "
+                  f"{avg_df1:>10.1%} | {avg_iou:>10.1%}")
+        print("=" * 72)
 
 
 def main():
