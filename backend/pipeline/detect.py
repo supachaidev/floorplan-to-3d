@@ -59,10 +59,10 @@ def detect_rooms_cv(image: np.ndarray, classify: bool = True) -> list[dict] | No
     # Prepare blurred variant to sweep over
     blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
 
-    best_rooms = None
-    best_score = -1.0
+    # First pass: collect all valid candidates and their room counts
+    candidates = []
+    all_counts = []
 
-    # Parameter sweep including blur variant
     for img in [enhanced, blurred]:
         for block_size in [11, 15, 21, 31]:
             for c_val in [2, 4, 6, 8]:
@@ -72,10 +72,27 @@ def detect_rooms_cv(image: np.ndarray, classify: bool = True) -> list[dict] | No
                     )
                     if rooms is None:
                         continue
-                    score = _score_room_set(rooms)
-                    if score > best_score:
-                        best_score = score
-                        best_rooms = rooms
+                    all_counts.append(len(rooms))
+                    candidates.append(rooms)
+
+    if not candidates:
+        return None
+
+    # Use 75th percentile of observed room counts as the target.
+    # Modal count under-estimates (many combos miss rooms via wall gaps).
+    # Upper quartile is closer to true count without being noisy.
+    all_counts_sorted = sorted(all_counts)
+    target_count = all_counts_sorted[int(len(all_counts_sorted) * 0.75)]
+
+    # Second pass: score with consensus bonus toward target count
+    best_rooms = None
+    best_score = -1.0
+
+    for rooms in candidates:
+        score = _score_room_set(rooms, target_count)
+        if score > best_score:
+            best_score = score
+            best_rooms = rooms
 
     if best_rooms is None:
         return None
@@ -125,11 +142,12 @@ def _merge_overlapping_rooms(rooms: list[dict], iou_threshold: float = 0.5) -> l
     return [r for idx, r in enumerate(rooms) if idx not in drop]
 
 
-def _score_room_set(rooms: list[dict]) -> float:
+def _score_room_set(rooms: list[dict], modal_count: int = 0) -> float:
     """Score a set of detected rooms by quality, not just count.
 
     Prefers results where total room area covers 30-90% of the image
     with minimal mutual overlap and uniform room sizes (not fragmented).
+    When modal_count is provided, rewards room counts near the consensus.
     """
     if not rooms:
         return -1.0
@@ -147,6 +165,15 @@ def _score_room_set(rooms: list[dict]) -> float:
 
     # Reward more rooms (log scale, capped to avoid runaway)
     count_score = min(math.log2(max(len(rooms), 1)) / 5.0, 0.5)
+
+    # Consensus bonus: reward room counts near the modal count.
+    # Many parameter combos converging on the same count is a strong
+    # signal that it's the true room count.
+    consensus_bonus = 0.0
+    if modal_count > 0:
+        count_diff = abs(len(rooms) - modal_count)
+        # Full bonus at exact match, decays linearly, zero at ±4
+        consensus_bonus = 0.3 * max(0, 1.0 - count_diff / 4.0)
 
     # Penalize fragmentation: if many rooms are tiny (< 1% of image),
     # the result is likely noise from aggressive thresholding
@@ -180,7 +207,8 @@ def _score_room_set(rooms: list[dict]) -> float:
         if combined.sum() > 0:
             overlap_penalty = 2.0 * double_count.sum() / combined.sum()
 
-    return coverage_score + count_score + regularity_bonus - frag_penalty - overlap_penalty
+    return (coverage_score + count_score + consensus_bonus
+            + regularity_bonus - frag_penalty - overlap_penalty)
 
 
 def _find_enclosed_rooms(
