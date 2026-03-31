@@ -265,6 +265,21 @@ def _find_enclosed_rooms(
             px, py = pt[0]
             polygon.append({"x": round(px / w, 4), "y": round(py / h, 4)})
 
+        # Expand polygon outward from centroid to compensate for wall
+        # thickness. OpenCV traces inner room boundaries, but ground truth
+        # (and architectural convention) uses wall centerlines, making
+        # detected rooms systematically smaller in area.
+        cx = sum(p["x"] for p in polygon) / len(polygon)
+        cy = sum(p["y"] for p in polygon) / len(polygon)
+        expand = 1.18
+        polygon = [
+            {
+                "x": round(cx + (p["x"] - cx) * expand, 4),
+                "y": round(cy + (p["y"] - cy) * expand, 4),
+            }
+            for p in polygon
+        ]
+
         rooms.append({
             "label": f"Room {len(rooms) + 1}",
             "polygon": polygon,
