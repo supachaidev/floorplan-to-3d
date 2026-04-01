@@ -802,10 +802,15 @@
                 opacity: 0.5,
                 transparent: true,
                 side: THREE.DoubleSide,
+                depthWrite: false,
+                polygonOffset: true,
+                polygonOffsetFactor: 1,
+                polygonOffsetUnit: 1,
             });
             const floorMesh = new THREE.Mesh(floorGeo, floorMat);
             floorMesh.rotation.x = -Math.PI / 2;
-            floorMesh.position.y = 0.01;
+            floorMesh.position.y = 0.02;
+            floorMesh.renderOrder = 1;
             floorMesh.userData.isFloorplan = true;
             scene.add(floorMesh);
 
@@ -816,10 +821,11 @@
                 opacity: 0.6,
                 transparent: true,
                 side: THREE.DoubleSide,
+                depthWrite: false,
             });
             const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
             ceilMesh.rotation.x = -Math.PI / 2;
-            ceilMesh.position.y = height - 0.01;
+            ceilMesh.position.y = height - 0.02;
             ceilMesh.userData.isFloorplan = true;
             scene.add(ceilMesh);
         });
