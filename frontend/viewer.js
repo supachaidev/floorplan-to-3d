@@ -206,7 +206,7 @@
         const threshold = Math.max(WALL_THICKNESS * 4, wallLen * 0.08);
         if (dist > threshold) return null;
 
-        return { t, width: door.width || 0.9 };
+        return { t, width: door.width || 0.9, angle: door.angle || 0 };
     }
 
     /**
@@ -327,9 +327,21 @@
                     // Split wall into solid sections and door openings
                     let prevT = 0;
                     for (const dh of wallDoorHits) {
-                        const halfW = (dh.width / 2) / wallLen;
-                        const doorStart = Math.max(0, dh.t - halfW);
-                        const doorEnd = Math.min(1, dh.t + halfW);
+                        const doorW = dh.width / wallLen;
+                        // The hinge (red dot) is at t. The door panel extends
+                        // from the hinge in the swing direction. Project the
+                        // door's swing angle onto the wall direction to decide
+                        // which side of t the opening extends toward.
+                        const wallAngle = Math.atan2(b.y - a.y, b.x - a.x);
+                        const doorRad = (dh.angle || 0) * Math.PI / 180;
+                        const dot = Math.cos(doorRad - wallAngle);
+                        // If dot > 0, door swings in the wall's A→B direction
+                        const doorStart = dot >= 0
+                            ? Math.max(0, dh.t)
+                            : Math.max(0, dh.t - doorW);
+                        const doorEnd = dot >= 0
+                            ? Math.min(1, dh.t + doorW)
+                            : Math.min(1, dh.t);
 
                         // Solid wall before this door
                         if (doorStart > prevT + 0.001) {
