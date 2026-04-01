@@ -6,3 +6,4 @@ node_modules/
 .DS_Store
 backend/.cubicasa/
 backend/tests/fixtures/
+backend/results_*.json
