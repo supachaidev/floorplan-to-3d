@@ -5,7 +5,14 @@
 (function () {
     const container = document.getElementById("viewer-3d");
     let scene, camera, renderer, controls;
+    let fpControls; // PointerLockControls for first-person mode
     let initialized = false;
+    let fpMode = false;
+    const moveState = { forward: false, backward: false, left: false, right: false, up: false, down: false };
+    const MOVE_SPEED = 5.0;
+    const EYE_HEIGHT = 1.6;
+    let prevTime = performance.now();
+    let floorplanCenter = null; // used to position FP camera inside the model
 
     const ROOM_MATERIALS = {
         bedroom: { color: 0x6495ed, opacity: 0.7 },
@@ -63,8 +70,57 @@
         const grid = new THREE.GridHelper(30, 30, 0x333333, 0x222222);
         scene.add(grid);
 
+        // First-person controls (initially disabled)
+        fpControls = new THREE.PointerLockControls(camera, renderer.domElement);
+        fpControls.addEventListener("lock", () => {
+            fpMode = true;
+            controls.enabled = false;
+            camera.fov = 70; // wider FOV for immersive first-person
+            camera.updateProjectionMatrix();
+            const hint = document.getElementById("fp-hint");
+            if (hint) { hint.style.display = "block"; setTimeout(() => hint.style.display = "none", 3000); }
+            const btn = document.getElementById("walkthrough-btn");
+            if (btn) btn.textContent = "Exit (Esc)";
+        });
+        fpControls.addEventListener("unlock", () => {
+            fpMode = false;
+            controls.enabled = true;
+            camera.fov = 50; // restore orbit FOV
+            camera.updateProjectionMatrix();
+            Object.keys(moveState).forEach(k => moveState[k] = false);
+            const btn = document.getElementById("walkthrough-btn");
+            if (btn) btn.textContent = "Walk Through";
+        });
+
+        document.addEventListener("keydown", onKeyDown);
+        document.addEventListener("keyup", onKeyUp);
+
         window.addEventListener("resize", onResize);
         animate();
+    }
+
+    function onKeyDown(e) {
+        if (!fpMode) return;
+        switch (e.code) {
+            case "KeyW": case "ArrowUp":    moveState.forward = true; break;
+            case "KeyS": case "ArrowDown":  moveState.backward = true; break;
+            case "KeyA": case "ArrowLeft":  moveState.left = true; break;
+            case "KeyD": case "ArrowRight": moveState.right = true; break;
+            case "Space":                   moveState.up = true; e.preventDefault(); break;
+            case "ShiftLeft": case "ShiftRight": moveState.down = true; break;
+        }
+    }
+
+    function onKeyUp(e) {
+        if (!fpMode) return;
+        switch (e.code) {
+            case "KeyW": case "ArrowUp":    moveState.forward = false; break;
+            case "KeyS": case "ArrowDown":  moveState.backward = false; break;
+            case "KeyA": case "ArrowLeft":  moveState.left = false; break;
+            case "KeyD": case "ArrowRight": moveState.right = false; break;
+            case "Space":                   moveState.up = false; break;
+            case "ShiftLeft": case "ShiftRight": moveState.down = false; break;
+        }
     }
 
     function onResize() {
@@ -78,7 +134,23 @@
 
     function animate() {
         requestAnimationFrame(animate);
-        if (controls) controls.update();
+
+        const now = performance.now();
+        const delta = (now - prevTime) / 1000;
+        prevTime = now;
+
+        if (fpMode && fpControls.isLocked) {
+            const speed = MOVE_SPEED * delta;
+            if (moveState.forward) fpControls.moveForward(speed);
+            if (moveState.backward) fpControls.moveForward(-speed);
+            if (moveState.left) fpControls.moveRight(-speed);
+            if (moveState.right) fpControls.moveRight(speed);
+            if (moveState.up) camera.position.y += speed;
+            if (moveState.down) camera.position.y -= speed;
+        } else if (controls) {
+            controls.update();
+        }
+
         if (renderer && scene && camera) renderer.render(scene, camera);
     }
 
@@ -435,6 +507,7 @@
         if (!bbox.isEmpty()) {
             const center = new THREE.Vector3();
             bbox.getCenter(center);
+            floorplanCenter = center.clone();
             const size = bbox.getSize(new THREE.Vector3());
             const maxDim = Math.max(size.x, size.y, size.z);
             camera.position.set(
@@ -445,6 +518,9 @@
             controls.target.copy(center);
             controls.update();
         }
+
+        // Exit FP mode on new render
+        if (fpMode && fpControls) fpControls.unlock();
     }
 
     /**
@@ -677,6 +753,7 @@
         if (!bbox.isEmpty()) {
             const center = new THREE.Vector3();
             bbox.getCenter(center);
+            floorplanCenter = center.clone();
             const size = bbox.getSize(new THREE.Vector3());
             const maxDim = Math.max(size.x, size.y, size.z);
             camera.position.set(
@@ -687,12 +764,16 @@
             controls.target.copy(center);
             controls.update();
         }
+
+        // Exit FP mode on new render
+        if (fpMode && fpControls) fpControls.unlock();
     }
 
     function renderFloor(rooms, cx, cy) {
         rooms.forEach((room) => {
             const pts = room.polygon;
             if (pts.length < 3) return;
+            const height = room.height || 3.0;
 
             const shape = new THREE.Shape();
             shape.moveTo(pts[0].x - cx, -(pts[0].y - cy));
@@ -701,18 +782,34 @@
             }
             shape.lineTo(pts[0].x - cx, -(pts[0].y - cy));
 
-            const geo = new THREE.ShapeGeometry(shape);
-            const mat = new THREE.MeshPhongMaterial({
-                color: 0x444444,
-                opacity: 0.3,
+            // Floor
+            const floorGeo = new THREE.ShapeGeometry(shape);
+            const matConfig = ROOM_MATERIALS[room.type] || ROOM_MATERIALS.other;
+            const floorMat = new THREE.MeshPhongMaterial({
+                color: matConfig.color,
+                opacity: 0.5,
                 transparent: true,
                 side: THREE.DoubleSide,
             });
-            const mesh = new THREE.Mesh(geo, mat);
-            mesh.rotation.x = -Math.PI / 2;
-            mesh.position.y = 0.01;
-            mesh.userData.isFloorplan = true;
-            scene.add(mesh);
+            const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+            floorMesh.rotation.x = -Math.PI / 2;
+            floorMesh.position.y = 0.01;
+            floorMesh.userData.isFloorplan = true;
+            scene.add(floorMesh);
+
+            // Ceiling
+            const ceilGeo = new THREE.ShapeGeometry(shape);
+            const ceilMat = new THREE.MeshPhongMaterial({
+                color: 0xeeeeee,
+                opacity: 0.6,
+                transparent: true,
+                side: THREE.DoubleSide,
+            });
+            const ceilMesh = new THREE.Mesh(ceilGeo, ceilMat);
+            ceilMesh.rotation.x = -Math.PI / 2;
+            ceilMesh.position.y = height - 0.01;
+            ceilMesh.userData.isFloorplan = true;
+            scene.add(ceilMesh);
         });
     }
 
@@ -749,6 +846,22 @@
         return sprite;
     }
 
+    function toggleWalkthrough() {
+        if (!initialized || !fpControls) return;
+        if (fpMode) {
+            fpControls.unlock();
+        } else {
+            // Position camera inside the floorplan at eye height
+            if (floorplanCenter) {
+                camera.position.set(floorplanCenter.x, EYE_HEIGHT, floorplanCenter.z);
+            } else {
+                camera.position.set(0, EYE_HEIGHT, 0);
+            }
+            camera.lookAt(camera.position.x, EYE_HEIGHT, camera.position.z - 1);
+            fpControls.lock();
+        }
+    }
+
     // Public API
-    window.viewer = { render };
+    window.viewer = { render, toggleWalkthrough };
 })();

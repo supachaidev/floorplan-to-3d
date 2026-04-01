@@ -1051,7 +1051,11 @@
 
     function confirmAndRender3D() {
         const data = getFloorplanData();
-        if (data) window.viewer.render(data);
+        if (data) {
+            window.viewer.render(data);
+            const vt = document.getElementById("viewer-toolbar");
+            if (vt) vt.style.display = "flex";
+        }
     }
 
     function startAddDoor() {

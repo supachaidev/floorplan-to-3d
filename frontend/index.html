@@ -151,6 +151,17 @@
         <div class="panel">
             <div class="panel-label">3D Viewer</div>
             <div id="viewer-3d"></div>
+            <div class="toolbar" id="viewer-toolbar" style="display:none;left:auto;right:12px;">
+                <button id="walkthrough-btn" onclick="window.viewer.toggleWalkthrough()">Walk Through</button>
+            </div>
+            <div id="fp-hint" style="display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+                background:rgba(0,0,0,0.8);padding:24px 32px;border-radius:12px;text-align:center;z-index:20;
+                pointer-events:none;font-size:14px;color:#ccc;line-height:1.8;">
+                <div style="font-size:18px;color:#fff;margin-bottom:8px;font-weight:600;">First-Person Mode</div>
+                <b>WASD</b> — move &nbsp; <b>Mouse</b> — look<br>
+                <b>Space</b> — up &nbsp; <b>Shift</b> — down<br>
+                <b>Esc</b> — exit walkthrough
+            </div>
         </div>
     </div>
 
@@ -158,6 +169,7 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
     <script src="editor.js"></script>
     <script src="viewer.js"></script>
     <script>
@@ -245,6 +257,7 @@
 
                 // Also render 3D immediately
                 window.viewer.render(currentFloorplan);
+                document.getElementById("viewer-toolbar").style.display = "flex";
 
             } catch (err) {
                 statusEl.textContent = `Error: ${err.message}`;
