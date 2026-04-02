@@ -33,8 +33,13 @@ def deskew(image: np.ndarray) -> np.ndarray:
             np.linalg.norm(rect[0] - rect[3]),
             np.linalg.norm(rect[1] - rect[2]),
         )
-        # Guard against degenerate quadrilaterals
-        if w >= 2 and h >= 2:
+        # Guard against degenerate quadrilaterals and over-cropping.
+        # Skip if the warped result would be less than 25% of the
+        # original area — the quad likely captured the drawing content
+        # rather than the page boundary, so warping would destroy it.
+        orig_area = image.shape[0] * image.shape[1]
+        warp_area = w * h
+        if w >= 2 and h >= 2 and warp_area >= 0.25 * orig_area:
             dst = np.array(
                 [[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32
             )
