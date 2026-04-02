@@ -865,8 +865,17 @@
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
-        // If double-clicking a handle, ignore
-        if (findHandle(mx, my)) return;
+        // Double-click on door handle → flip door swing direction
+        const handle = findHandle(mx, my);
+        if (handle && handle.doorIdx !== undefined) {
+            const door = doors[handle.doorIdx];
+            // Flip by reflecting the angle: add 180° and negate the arc offset.
+            // This mirrors the swing from left-to-right ↔ right-to-left.
+            door.angle = (door.angle + 180) % 360;
+            draw();
+            return;
+        }
+        if (handle) return;
 
         const edge = findEdge(mx, my);
         if (edge) {
