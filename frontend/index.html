@@ -124,6 +124,7 @@
             <select id="pipeline-select" style="background:#222;color:#e0e0e0;border:1px solid #555;padding:6px 10px;border-radius:6px;font-size:13px;">
                 <option value="opencv">OpenCV Pipeline</option>
                 <option value="vlm">CV + Gemini Labels</option>
+                <option value="vlm-segment">Gemini Segment + CV</option>
             </select>
             <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">
                 Choose Image
@@ -209,16 +210,20 @@
 
         async function processFile(file) {
             const pipeline = document.getElementById("pipeline-select").value;
-            statusEl.textContent = pipeline === "vlm"
-                ? "Processing with Gemini VLM..."
-                : "Uploading and processing...";
+            const statusMessages = {
+                "opencv": "Uploading and processing...",
+                "vlm": "Processing with Gemini VLM...",
+                "vlm-segment": "Segmenting with Gemini seeds...",
+            };
+            statusEl.textContent = statusMessages[pipeline] || "Processing...";
             uploadBtn.disabled = true;
             processBtn.disabled = true;
 
             const formData = new FormData();
             formData.append("file", file);
 
-            const endpoint = pipeline === "vlm" ? "/upload-vlm" : "/upload";
+            const endpointMap = {"opencv": "/upload", "vlm": "/upload-vlm", "vlm-segment": "/upload-vlm-segment"};
+            const endpoint = endpointMap[pipeline] || "/upload";
             const url = `${API_URL}${endpoint}`;
 
             try {
@@ -235,8 +240,8 @@
                 }
                 const nRooms = currentFloorplan.floorplan.rooms.length;
                 const nDoors = (currentFloorplan.floorplan.doors || []).length;
-                const pipelineLabel = pipeline === "vlm" ? "VLM+CV" : "CV";
-                statusEl.textContent = `${pipelineLabel}: ${nRooms} rooms, ${nDoors} doors`;
+                const pipelineLabels = {"opencv": "CV", "vlm": "VLM+CV", "vlm-segment": "VLM-Seg"};
+                statusEl.textContent = `${pipelineLabels[pipeline] || "CV"}: ${nRooms} rooms, ${nDoors} doors`;
 
                 // Update 2D editor with detected data
                 const imgUrl = URL.createObjectURL(file);
