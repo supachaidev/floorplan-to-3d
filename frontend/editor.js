@@ -601,15 +601,19 @@
             const sp = toScreen(door.position);
             const rPx = (door.width || 0.9) * scale;
             const mid = (door.angle || 0) * Math.PI / 180;
-            const cA = mid - Math.PI / 4, oA = mid + Math.PI / 4;
+            const half = Math.PI / 4;
+            const flipped = !!door.flipped;
+            const cA = flipped ? mid + half : mid - half;
+            const oA = flipped ? mid - half : mid + half;
+            const ccw = flipped;
 
             // Filled sector
             ctx.beginPath(); ctx.moveTo(sp.x, sp.y);
-            ctx.arc(sp.x, sp.y, rPx, cA, oA); ctx.closePath();
+            ctx.arc(sp.x, sp.y, rPx, cA, oA, ccw); ctx.closePath();
             ctx.fillStyle = "rgba(255,107,107,0.1)"; ctx.fill();
 
             // Arc (dashed)
-            ctx.beginPath(); ctx.arc(sp.x, sp.y, rPx, cA, oA);
+            ctx.beginPath(); ctx.arc(sp.x, sp.y, rPx, cA, oA, ccw);
             ctx.strokeStyle = "#FF6B6B"; ctx.lineWidth = 2;
             ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
 
@@ -865,13 +869,25 @@
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left, my = e.clientY - rect.top;
 
-        // Double-click on door handle → flip door swing direction
+        // Double-click on door → mirror: move hinge to other end, flip arc
         const handle = findHandle(mx, my);
         if (handle && handle.doorIdx !== undefined) {
             const door = doors[handle.doorIdx];
-            // Flip by reflecting the angle: add 180° and negate the arc offset.
-            // This mirrors the swing from left-to-right ↔ right-to-left.
-            door.angle = (door.angle + 180) % 360;
+            const sp = toScreen(door.position);
+            const s = getScale();
+            const r = (door.width || 0.9) * s;
+            const mid = (door.angle || 0) * Math.PI / 180;
+            const half = Math.PI / 4;
+            // Closed edge direction depends on current flip state
+            const closedDir = door.flipped ? mid + half : mid - half;
+            const tipX = sp.x + r * Math.cos(closedDir);
+            const tipY = sp.y + r * Math.sin(closedDir);
+            const newPos = fromScreen(tipX, tipY);
+            door.position = {
+                x: Math.round(newPos.x * 10000) / 10000,
+                y: Math.round(newPos.y * 10000) / 10000,
+            };
+            door.flipped = !door.flipped;
             draw();
             return;
         }
