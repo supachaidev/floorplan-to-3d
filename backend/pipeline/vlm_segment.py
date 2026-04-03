@@ -218,7 +218,7 @@ def _mask_to_polygon(
     polygon = []
     for pt in approx:
         px, py = pt[0]
-        polygon.append({"x": round(px / w, 4), "y": round(py / h, 4)})
+        polygon.append({"x": round(float(px) / w, 4), "y": round(float(py) / h, 4)})
 
     return polygon
 
