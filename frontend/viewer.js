@@ -106,12 +106,11 @@
     }
 
     /**
-     * Project a door onto a wall segment and return the parametric
-     * t value (0..1) along the wall, or null if the door is not
-     * close enough. Uses the hinge point (on the wall) if available,
-     * falling back to the centroid position.
+     * Project a door onto a wall segment and return the perpendicular
+     * distance and parametric t value. Returns null only for degenerate
+     * walls. The caller decides which wall is "best" for each door.
      */
-    function doorOnWall(ax, ay, bx, by, door) {
+    function projectDoorOnWall(ax, ay, bx, by, door) {
         const dx = bx - ax, dy = by - ay;
         const len2 = dx * dx + dy * dy;
         if (len2 < 1e-8) return null;
@@ -120,21 +119,65 @@
         const px = ref.x - ax;
         const py = ref.y - ay;
 
-        // Parametric projection onto line segment
+        const wallLen = Math.sqrt(len2);
         let t = (px * dx + py * dy) / len2;
-        if (t < 0 || t > 1) return null;
+        // Clamp t to [0, 1] — door may be slightly past wall ends
+        const tClamped = Math.max(0, Math.min(1, t));
 
-        // Perpendicular distance from reference point to wall line
-        const projX = ax + t * dx;
-        const projY = ay + t * dy;
+        const projX = ax + tClamped * dx;
+        const projY = ay + tClamped * dy;
         const dist = Math.sqrt((ref.x - projX) ** 2 + (ref.y - projY) ** 2);
 
-        // Allow doors within a reasonable distance from the wall
-        const wallLen = Math.sqrt(len2);
-        const threshold = Math.max(WALL_THICKNESS * 4, wallLen * 0.08);
-        if (dist > threshold) return null;
+        return { t: tClamped, dist, width: door.width || 0.9, wallLen };
+    }
 
-        return { t, width: door.width || 0.9 };
+    /**
+     * For each door, find the best matching wall edge across all rooms.
+     * Returns a Map: "roomIdx-edgeIdx" → array of { t, width }.
+     */
+    function matchDoorsToWalls(rooms, doors) {
+        const wallCuts = new Map();
+        const MAX_DIST = 2.0; // generous 2m threshold
+
+        for (const door of doors) {
+            let bestKey = null;
+            let bestProj = null;
+            let bestDist = Infinity;
+
+            for (let ri = 0; ri < rooms.length; ri++) {
+                const pts = rooms[ri].polygon;
+                if (!pts || pts.length < 3) continue;
+                for (let ei = 0; ei < pts.length; ei++) {
+                    const a = pts[ei];
+                    const b = pts[(ei + 1) % pts.length];
+                    const proj = projectDoorOnWall(a.x, a.y, b.x, b.y, door);
+                    if (!proj) continue;
+                    if (proj.dist < bestDist) {
+                        bestDist = proj.dist;
+                        bestProj = proj;
+                        bestKey = `${ri}-${ei}`;
+                    }
+                }
+            }
+
+            if (bestKey && bestDist < MAX_DIST) {
+                if (!wallCuts.has(bestKey)) wallCuts.set(bestKey, []);
+                wallCuts.get(bestKey).push({
+                    t: bestProj.t,
+                    width: bestProj.width,
+                });
+            }
+        }
+
+        if (doors.length > 0 && wallCuts.size === 0) {
+            console.warn("[viewer] No doors matched any wall edge. " +
+                "Doors:", doors.length, "Rooms:", rooms.length);
+        } else if (doors.length > 0) {
+            console.log("[viewer] Matched doors to", wallCuts.size,
+                "wall edges out of", doors.length, "doors");
+        }
+
+        return wallCuts;
     }
 
     /**
@@ -206,8 +249,14 @@
         cx /= count;
         cy /= count;
 
+        // Pre-compute which wall edges need door openings
+        const wallCuts = matchDoorsToWalls(rooms, doors);
+
+        console.log("[viewer] Rendering", rooms.length, "rooms,",
+            doors.length, "doors");
+
         // Render each room as wall segments with door openings
-        rooms.forEach((room) => {
+        rooms.forEach((room, roomIdx) => {
             const pts = room.polygon;
             if (pts.length < 3) return;
 
@@ -218,6 +267,9 @@
                 opacity: matConfig.opacity,
                 transparent: true,
                 side: THREE.DoubleSide,
+                polygonOffset: true,
+                polygonOffsetFactor: 1,
+                polygonOffsetUnits: 1,
             });
 
             // For each edge of the room polygon, build a wall segment
@@ -236,12 +288,9 @@
                 const nx = -edgeDz / wallLen * (WALL_THICKNESS / 2);
                 const nz = edgeDx / wallLen * (WALL_THICKNESS / 2);
 
-                // Find doors on this wall segment
-                const wallDoorHits = [];
-                for (const door of doors) {
-                    const hit = doorOnWall(a.x, a.y, b.x, b.y, door);
-                    if (hit) wallDoorHits.push(hit);
-                }
+                // Look up pre-computed door cuts for this wall edge
+                const key = `${roomIdx}-${i}`;
+                const wallDoorHits = wallCuts.get(key) || [];
 
                 if (wallDoorHits.length === 0) {
                     // Solid wall, no doors
@@ -255,9 +304,11 @@
                     // Split wall into solid sections and door openings
                     let prevT = 0;
                     for (const dh of wallDoorHits) {
-                        const halfW = (dh.width / 2) / wallLen;
-                        const doorStart = Math.max(0, dh.t - halfW);
-                        const doorEnd = Math.min(1, dh.t + halfW);
+                        // Door extends from hinge by full width; since we
+                        // don't know which direction, expand both ways
+                        const fullW = dh.width / wallLen;
+                        const doorStart = Math.max(0, dh.t - fullW);
+                        const doorEnd = Math.min(1, dh.t + fullW);
 
                         // Solid wall before this door
                         if (doorStart > prevT + 0.001) {
