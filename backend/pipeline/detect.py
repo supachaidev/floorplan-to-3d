@@ -347,11 +347,16 @@ def _classify_rooms_by_geometry(rooms: list[dict]) -> None:
 
 
 # Door detection thresholds
-_DOOR_ASPECT_MIN = 0.65            # tightened: quarter-circles are near-square
-_DOOR_BBOX_FILL_MIN = 0.55         # tightened: a true quarter-circle fills ~78.5%
-_DOOR_BBOX_FILL_MAX = 0.88
-_DOOR_QTR_AREA_RATIO_MIN = 0.65    # tightened around ideal 1.0
-_DOOR_QTR_AREA_RATIO_MAX = 1.15
+_DOOR_ASPECT_MIN = 0.65            # quarter-circles are near-square
+_DOOR_BBOX_FILL_MIN = 0.55         # a true filled quarter-circle fills ~78.5%
+_DOOR_BBOX_FILL_MAX = 0.88         # above this, assume outlined-arc style (see below)
+_DOOR_QTR_AREA_RATIO_MIN = 0.65    # around ideal 1.0
+_DOOR_QTR_AREA_RATIO_MAX = 1.25    # allow some slack for antialiased arc edges
+# Outlined-arc doors (thin strokes drawn as arc + leaf lines) fill their bbox in
+# contour-polygon terms but have very low actual pixel density. The arc creates a
+# deep concave indent in the contour that shows up as a large convexity defect.
+_DOOR_OUTLINE_FILL_MAX = 0.20        # painted pixels / hull pixels threshold
+_DOOR_OUTLINE_DEFECT_MIN_FRAC = 0.40  # deepest convexity defect must be ≥40% of max bbox dim
 _DOOR_SOLIDITY_MIN = 0.88          # tightened: pie shapes are nearly convex
 _DOOR_RADIUS_FRAC_MIN = 0.02       # fraction of max image dimension
 _DOOR_RADIUS_FRAC_MAX = 0.15
@@ -418,12 +423,7 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
             continue
 
         bbox_fill = area / (bw * bh)
-        if bbox_fill < _DOOR_BBOX_FILL_MIN or bbox_fill > _DOOR_BBOX_FILL_MAX:
-            continue
-
-        quarter_area = math.pi * radius_est * radius_est / 4
-        area_ratio = area / quarter_area
-        if area_ratio < _DOOR_QTR_AREA_RATIO_MIN or area_ratio > _DOOR_QTR_AREA_RATIO_MAX:
+        if bbox_fill < _DOOR_BBOX_FILL_MIN:
             continue
 
         hull = cv2.convexHull(cnt)
@@ -431,6 +431,35 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
         solidity = area / hull_area if hull_area > 0 else 0
         if solidity < _DOOR_SOLIDITY_MIN:
             continue
+
+        # Two drawing styles to support:
+        #   • Filled pie (CubiCasa style): bbox_fill ≈ π/4 ≈ 0.785, contour area ≈ pie area.
+        #   • Outlined arc: thin strokes tracing an L-curve (leaf + arc). The contour
+        #     polygon wraps the whole enclosure, so bbox_fill can approach 1.0, but the
+        #     actual painted-pixel density inside the hull is low (~0.07–0.12).
+        is_outlined = bbox_fill > _DOOR_BBOX_FILL_MAX
+        if is_outlined:
+            hull_mask = np.zeros(binary.shape, dtype=np.uint8)
+            cv2.drawContours(hull_mask, [hull], -1, 255, -1)
+            painted = cv2.countNonZero(cv2.bitwise_and(binary, hull_mask))
+            hull_px = max(cv2.countNonZero(hull_mask), 1)
+            fill_in_hull = painted / hull_px
+            if fill_in_hull > _DOOR_OUTLINE_FILL_MAX:
+                continue  # solid rectangle, not an outlined door
+            # The arc of an outlined door creates a deep concave indentation in the
+            # contour. Walls / rectangular outlines have no such indent.
+            hull_idx = cv2.convexHull(cnt, returnPoints=False)
+            defects = cv2.convexityDefects(cnt, hull_idx)
+            if defects is None:
+                continue
+            max_defect_depth = max(d[0, 3] / 256.0 for d in defects)
+            if max_defect_depth < _DOOR_OUTLINE_DEFECT_MIN_FRAC * radius_est:
+                continue
+        else:
+            quarter_area = math.pi * radius_est * radius_est / 4
+            area_ratio = area / quarter_area
+            if area_ratio < _DOOR_QTR_AREA_RATIO_MIN or area_ratio > _DOOR_QTR_AREA_RATIO_MAX:
+                continue
 
         # Simplify the hull so angle measurements reflect real corners, not
         # near-collinear contour noise. Epsilon proportional to contour perimeter.
@@ -441,8 +470,14 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
         if n < 3:
             continue
 
-        min_angle = 999.0
+        # The hinge of a door arc is the ~90° corner where the two radii meet.
+        # On a simplified hull, a quarter-circle becomes a triangle or quad with
+        # angles like [73°, 90°, 63°, 134°] — the 90° corner is the hinge, NOT
+        # the minimum-angle corner. Pick the corner whose angle is closest to 90°.
+        best_dev = 999.0
+        hinge_angle = 0.0
         hinge_idx = 0
+        all_angles = []
         for j in range(n):
             p0 = hull_pts[(j - 1) % n]
             p1 = hull_pts[j]
@@ -455,15 +490,14 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
                 continue
             cos_a = np.dot(v1, v2) / (norm1 * norm2)
             angle = math.degrees(math.acos(np.clip(cos_a, -1.0, 1.0)))
-            if angle < min_angle:
-                min_angle = angle
+            all_angles.append(angle)
+            dev = abs(angle - 90.0)
+            if dev < best_dev:
+                best_dev = dev
+                hinge_angle = angle
                 hinge_idx = j
 
-        # Real door arcs have a near-90° corner at the hinge (two perpendicular
-        # edges: the wall side and the leaf side). Chairs and rounded fixtures
-        # have no sharp corner; rectangular furniture has 4 corners all near 90°
-        # but with a specific solidity that differs from a true sector.
-        if not (_DOOR_HINGE_ANGLE_MIN <= min_angle <= _DOOR_HINGE_ANGLE_MAX):
+        if not (_DOOR_HINGE_ANGLE_MIN <= hinge_angle <= _DOOR_HINGE_ANGLE_MAX):
             continue
 
         hinge = hull_pts[hinge_idx]
