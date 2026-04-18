@@ -346,17 +346,22 @@ def _classify_rooms_by_geometry(rooms: list[dict]) -> None:
             room["label"] = base
 
 
-# Door detection thresholds — moderately relaxed for imperfect arcs
-_DOOR_ASPECT_MIN = 0.55
-_DOOR_BBOX_FILL_MIN = 0.45
+# Door detection thresholds
+_DOOR_ASPECT_MIN = 0.65            # tightened: quarter-circles are near-square
+_DOOR_BBOX_FILL_MIN = 0.55         # tightened: a true quarter-circle fills ~78.5%
 _DOOR_BBOX_FILL_MAX = 0.88
-_DOOR_QTR_AREA_RATIO_MIN = 0.50
-_DOOR_QTR_AREA_RATIO_MAX = 1.20
-_DOOR_SOLIDITY_MIN = 0.80
-_DOOR_RADIUS_FRAC_MIN = 0.02   # fraction of max image dimension
+_DOOR_QTR_AREA_RATIO_MIN = 0.65    # tightened around ideal 1.0
+_DOOR_QTR_AREA_RATIO_MAX = 1.15
+_DOOR_SOLIDITY_MIN = 0.88          # tightened: pie shapes are nearly convex
+_DOOR_RADIUS_FRAC_MIN = 0.02       # fraction of max image dimension
 _DOOR_RADIUS_FRAC_MAX = 0.15
 # Minimum distance (normalized) between distinct doors
 _DOOR_DEDUP_DIST = 0.025
+# Hinge corner must approximate a right angle (true door arcs have two perpendicular edges)
+_DOOR_HINGE_ANGLE_MIN = 70.0
+_DOOR_HINGE_ANGLE_MAX = 110.0
+# Hinge must be within this fraction of max image dim from a wall pixel
+_DOOR_WALL_PROXIMITY_FRAC = 0.015
 
 
 def detect_doors_cv(image: np.ndarray) -> list[dict]:
@@ -382,6 +387,16 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
     min_radius = max_dim * _DOOR_RADIUS_FRAC_MIN
     max_radius = max_dim * _DOOR_RADIUS_FRAC_MAX
     min_area = 80
+
+    # Build a wall mask for proximity filtering: only long, elongated dark
+    # structures count as walls. Furniture and text are short/compact so they
+    # get filtered out.
+    wall_mask = _build_wall_mask(binary, max_dim)
+    proximity_px = max(2, int(max_dim * _DOOR_WALL_PROXIMITY_FRAC))
+    # Distance transform of the INVERTED wall mask: pixel value = distance to nearest wall
+    dist_to_wall = cv2.distanceTransform(
+        cv2.bitwise_not(wall_mask), cv2.DIST_L2, 3,
+    )
 
     candidates = []
 
@@ -417,7 +432,11 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
         if solidity < _DOOR_SOLIDITY_MIN:
             continue
 
-        hull_pts = hull.reshape(-1, 2).astype(np.float64)
+        # Simplify the hull so angle measurements reflect real corners, not
+        # near-collinear contour noise. Epsilon proportional to contour perimeter.
+        peri = cv2.arcLength(hull, True)
+        simplified = cv2.approxPolyDP(hull, 0.04 * peri, True)
+        hull_pts = simplified.reshape(-1, 2).astype(np.float64)
         n = len(hull_pts)
         if n < 3:
             continue
@@ -440,7 +459,23 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
                 min_angle = angle
                 hinge_idx = j
 
+        # Real door arcs have a near-90° corner at the hinge (two perpendicular
+        # edges: the wall side and the leaf side). Chairs and rounded fixtures
+        # have no sharp corner; rectangular furniture has 4 corners all near 90°
+        # but with a specific solidity that differs from a true sector.
+        if not (_DOOR_HINGE_ANGLE_MIN <= min_angle <= _DOOR_HINGE_ANGLE_MAX):
+            continue
+
         hinge = hull_pts[hinge_idx]
+
+        # Reject candidates whose hinge is floating in free space — real doors
+        # are anchored on a wall. Furniture inside rooms fails this check.
+        hx, hy = int(round(hinge[0])), int(round(hinge[1]))
+        if 0 <= hx < w and 0 <= hy < h:
+            if dist_to_wall[hy, hx] > proximity_px:
+                continue
+        else:
+            continue
 
         M = cv2.moments(cnt)
         if M["m00"] == 0:
@@ -483,6 +518,26 @@ def detect_doors_cv(image: np.ndarray) -> list[dict]:
             })
 
     return doors
+
+
+def _build_wall_mask(binary: np.ndarray, max_dim: int) -> np.ndarray:
+    """Extract likely wall pixels from a thresholded image.
+
+    Walls are long, elongated dark structures. We keep connected components
+    whose bounding box has a long side ≥ 5% of the image; furniture, text, and
+    symbols are compact and get dropped. A mild horizontal/vertical closing
+    bridges small gaps from door openings so the mask is continuous along walls.
+    """
+    min_long_side = max(20, int(max_dim * 0.05))
+
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    mask = np.zeros_like(binary)
+    for i in range(1, num_labels):
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        if max(bw, bh) >= min_long_side:
+            mask[labels == i] = 255
+    return mask
 
 
 def detect_rooms(image: np.ndarray) -> dict:
