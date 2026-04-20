@@ -115,6 +115,44 @@
             color: #2563eb;
         }
         .drop-overlay.active { display: flex; }
+        .loading-overlay {
+            display: none;
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 15, 15, 0.6);
+            z-index: 20;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            gap: 14px;
+            backdrop-filter: blur(2px);
+        }
+        .loading-overlay.active { display: flex; }
+        .spinner {
+            width: 44px;
+            height: 44px;
+            border: 3px solid rgba(255,255,255,0.15);
+            border-top-color: #2563eb;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        .loading-text {
+            font-size: 13px;
+            color: #ddd;
+            letter-spacing: 0.3px;
+        }
+        .btn-spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            margin-right: 8px;
+            border: 2px solid rgba(255,255,255,0.35);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: -2px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -124,6 +162,7 @@
             <select id="pipeline-select" style="background:#222;color:#e0e0e0;border:1px solid #555;padding:6px 10px;border-radius:6px;font-size:13px;">
                 <option value="opencv">OpenCV Pipeline</option>
                 <option value="vlm">CV + Gemini Labels</option>
+                <option value="vlm-segment">Gemini Segment + CV</option>
             </select>
             <button class="upload-btn" id="upload-btn" onclick="document.getElementById('file-input').click()">
                 Choose Image
@@ -140,6 +179,10 @@
         <div class="panel">
             <div class="panel-label">2D Editor</div>
             <canvas id="canvas-2d"></canvas>
+            <div class="loading-overlay" id="loading-overlay">
+                <div class="spinner"></div>
+                <div class="loading-text" id="loading-text">Detecting rooms…</div>
+            </div>
             <div class="toolbar" id="editor-toolbar" style="display:none;">
                 <button onclick="window.editor.startAddWall()">Add Room</button>
                 <button onclick="window.editor.startMergeRooms()">Merge Rooms</button>
@@ -209,16 +252,28 @@
 
         async function processFile(file) {
             const pipeline = document.getElementById("pipeline-select").value;
-            statusEl.textContent = pipeline === "vlm"
-                ? "Processing with Gemini VLM..."
-                : "Uploading and processing...";
+            const statusMessages = {
+                "opencv": "Uploading and processing...",
+                "vlm": "Processing with Gemini VLM...",
+                "vlm-segment": "Segmenting with Gemini seeds...",
+            };
+            const overlayMessages = {
+                "opencv": "Detecting rooms…",
+                "vlm": "Labeling rooms with Gemini…",
+                "vlm-segment": "Segmenting with Gemini…",
+            };
+            statusEl.textContent = statusMessages[pipeline] || "Processing...";
+            document.getElementById("loading-text").textContent = overlayMessages[pipeline] || "Processing…";
+            document.getElementById("loading-overlay").classList.add("active");
+            processBtn.innerHTML = '<span class="btn-spinner"></span>Processing…';
             uploadBtn.disabled = true;
             processBtn.disabled = true;
 
             const formData = new FormData();
             formData.append("file", file);
 
-            const endpoint = pipeline === "vlm" ? "/upload-vlm" : "/upload";
+            const endpointMap = {"opencv": "/upload", "vlm": "/upload-vlm", "vlm-segment": "/upload-vlm-segment"};
+            const endpoint = endpointMap[pipeline] || "/upload";
             const url = `${API_URL}${endpoint}`;
 
             try {
@@ -235,8 +290,8 @@
                 }
                 const nRooms = currentFloorplan.floorplan.rooms.length;
                 const nDoors = (currentFloorplan.floorplan.doors || []).length;
-                const pipelineLabel = pipeline === "vlm" ? "VLM+CV" : "CV";
-                statusEl.textContent = `${pipelineLabel}: ${nRooms} rooms, ${nDoors} doors`;
+                const pipelineLabels = {"opencv": "CV", "vlm": "VLM+CV", "vlm-segment": "VLM-Seg"};
+                statusEl.textContent = `${pipelineLabels[pipeline] || "CV"}: ${nRooms} rooms, ${nDoors} doors`;
 
                 // Update 2D editor with detected data
                 const imgUrl = URL.createObjectURL(file);
@@ -251,6 +306,8 @@
             } finally {
                 uploadBtn.disabled = false;
                 processBtn.disabled = false;
+                processBtn.textContent = "Detect Rooms";
+                document.getElementById("loading-overlay").classList.remove("active");
             }
         }
     </script>

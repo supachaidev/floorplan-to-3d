@@ -169,6 +169,77 @@ async def upload_floorplan_vlm(
         )
 
 
+@app.post("/upload-vlm-segment")
+async def upload_floorplan_vlm_segment(
+    file: UploadFile = File(...),
+    model: str = Query("gemini-2.5-flash", description="Gemini model name"),
+):
+    """VLM-guided segmentation: Gemini identifies room centers,
+    OpenCV flood-fills for precise polygon extraction."""
+    if file.content_type and not file.content_type.startswith("image/"):
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Expected image file, got {file.content_type}"},
+        )
+
+    contents = await file.read()
+    if len(contents) > MAX_UPLOAD_BYTES:
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"File too large. Maximum size is {MAX_UPLOAD_BYTES // (1024*1024)} MB"},
+        )
+
+    np_arr = np.frombuffer(contents, np.uint8)
+    image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+    if image is None:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Could not decode image"},
+        )
+
+    try:
+        from pipeline.vlm_segment import segment_rooms_with_vlm
+
+        processed = deskew(image)
+        ph, pw = processed.shape[:2]
+
+        detection = segment_rooms_with_vlm(processed, model_name=model)
+        rooms = detection["rooms"]
+        doors = detection["doors"]
+
+        if not rooms:
+            return JSONResponse(
+                status_code=500,
+                content={"error": "VLM segmentation found no rooms. Try a cleaner image."},
+            )
+
+        for room in rooms:
+            room["polygon"] = simplify_polygon(room["polygon"])
+
+        scale = compute_scale(pw, ph)
+        rooms_m = normalize_to_meters(rooms, pw, ph, scale_m_per_px=scale)
+        doors_m = normalize_doors_to_meters(doors or [], pw, ph, scale_m_per_px=scale)
+
+        image_width_m = pw * scale
+        image_height_m = ph * scale
+        result = build_floorplan_json(rooms_m, doors_m, image_width_m, image_height_m)
+        return result
+
+    except RuntimeError as e:
+        logger.exception("VLM segment error")
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)},
+        )
+    except Exception:
+        logger.exception("VLM segment pipeline error")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "VLM segmentation failed. Try a cleaner image."},
+        )
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

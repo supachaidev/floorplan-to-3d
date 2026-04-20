@@ -7,3 +7,4 @@ node_modules/
 backend/.cubicasa/
 backend/tests/fixtures/
 backend/results_*.json
+test_samples/
